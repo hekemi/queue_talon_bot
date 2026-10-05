@@ -38,12 +38,13 @@ async def take_talon(message: Message, command: CommandObject):
 
     user_id = message.from_user.id
 
-    if user_id in queue:
-        number = talon_numbers[user_id]
-        await message.answer(f"Вы уже в очереди. Ваш талон №{number}")
+    if user_id in talon_numbers:
+        await message.answer(
+            f"Вы уже в очереди. Ваш талон №{talon_numbers[user_id]}"
+        )
         return
 
-    last_number = max(talon_numbers.values(), default=0)
+    occupied_numbers = set(talon_numbers.values())
 
     if command.args:
         try:
@@ -52,16 +53,20 @@ async def take_talon(message: Message, command: CommandObject):
             await message.answer("Используйте номер: /take_talon 5")
             return
 
-        if number <= last_number:
-            await message.answer(
-                f"Номер должен быть больше последнего талона: {last_number}"
-            )
+        if number <= 0:
+            await message.answer("Номер должен быть положительным.")
+            return
+
+        if number in occupied_numbers:
+            await message.answer(f"Талон №{number} уже занят.")
             return
     else:
-        number = last_number + 1
+        number = 1
+        while number in occupied_numbers:
+            number += 1
 
-    queue.append(user_id)
     talon_numbers[user_id] = number
+    queue.append(user_id)
 
     display_name = get_display_name(message)
     if display_name is not None:

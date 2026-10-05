@@ -6,6 +6,9 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.exceptions import TelegramUnauthorizedError, TelegramNetworkError
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from dotenv import load_dotenv
 
@@ -13,7 +16,10 @@ load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-dp = Dispatcher()
+class TalonStates(StatesGroup):
+    waiting_number = State()
+
+dp = Dispatcher(storage=MemoryStorage())
 
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
@@ -46,8 +52,7 @@ def get_display_name(message: Message) -> str | None:
     return str(user.id)
 
 
-@dp.message(Command("take_talon"))
-async def take_talon(message: Message, command: CommandObject):
+async def add_talon(message: Message, number: int):
     if message.from_user is None:
         return
 
@@ -61,24 +66,16 @@ async def take_talon(message: Message, command: CommandObject):
 
     occupied_numbers = set(talon_numbers.values())
 
-    if command.args:
-        try:
-            number = int(command.args.strip())
-        except ValueError:
-            await message.answer("Используйте номер: /take_talon 5")
-            return
-
-        if number <= 0:
-            await message.answer("Номер должен быть положительным.")
-            return
-
-        if number in occupied_numbers:
-            await message.answer(f"Талон №{number} уже занят.")
-            return
-    else:
+    if number == 0:
         number = 1
         while number in occupied_numbers:
             number += 1
+    elif number < 1:
+        await message.answer("Введите положительный номер или 0.")
+        return
+    elif number in occupied_numbers:
+        await message.answer(f"Талон №{number} уже занят.")
+        return
 
     talon_numbers[user_id] = number
     queue.append(user_id)
@@ -88,6 +85,39 @@ async def take_talon(message: Message, command: CommandObject):
         usernames[user_id] = display_name
 
     await message.answer(f"Вы заняли место. Ваш талон №{number}")
+
+
+@dp.message(Command("take_talon"))
+async def take_talon(message: Message, command: CommandObject):
+    if not command.args:
+        await add_talon(message, 0)
+        return
+
+    try:
+        number = int(command.args.strip())
+    except ValueError:
+        await message.answer("Введите номер или 0.")
+        return
+
+    await add_talon(message, number)
+
+
+@dp.message(TalonStates.waiting_number, F.text)
+async def process_talon_number(message: Message, state: FSMContext):
+    text = message.text
+
+    if text is None:
+        await message.answer("Введите целое число: 5 или 0.")
+        return
+
+    try:
+        number = int(text.strip())
+    except ValueError:
+        await message.answer("Введите целое число. Например: 5 или 0.")
+        return
+
+    await add_talon(message, number)
+    await state.clear()
 
 
 @dp.message(Command("dismiss_talon"))
@@ -133,8 +163,12 @@ async def start_handler(message: Message):
 
 
 @dp.message(F.text == "🎟 Взять талон")
-async def take_talon_button(message: Message):
-    await take_talon(message, CommandObject(args=None))
+async def take_talon_button(message: Message, state: FSMContext):
+    await state.set_state(TalonStates.waiting_number)
+    await message.answer(
+        "Введите желаемый номер талона.\n"
+        "Введите 0, чтобы занять ближайшее свободное место."
+    )
 
 
 @dp.message(F.text == "❌ Освободить место")

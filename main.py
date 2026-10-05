@@ -1,9 +1,11 @@
 import asyncio
+import logging
 import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
+from aiogram.exceptions import TelegramUnauthorizedError, TelegramNetworkError
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -48,8 +50,29 @@ async def main():
         raise RuntimeError("Не задан BOT_TOKEN")
 
     bot = Bot(token=TOKEN)
-    await dp.start_polling(bot)
+
+    try:
+        me = await bot.get_me()
+        print(f"Подключение к Telegram API успешно: @{me.username}")
+    except TelegramUnauthorizedError:
+        print("Ошибка: неверный BOT_TOKEN")
+        await bot.session.close()
+        return
+    except TelegramNetworkError as e:
+        print(f"Ошибка сети при подключении к Telegram API: {e}")
+        await bot.session.close()
+        return
+    except Exception as e:
+        print(f"Не удалось подключиться к Telegram API: {e}")
+        await bot.session.close()
+        return
+
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())

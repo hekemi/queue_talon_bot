@@ -7,6 +7,10 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from aiogram.exceptions import TelegramUnauthorizedError, TelegramNetworkError
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 TOKEN = os.getenv("BOT_TOKEN")
 
 dp = Dispatcher()

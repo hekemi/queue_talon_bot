@@ -2,9 +2,9 @@ import asyncio
 import logging
 import os
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.exceptions import TelegramUnauthorizedError, TelegramNetworkError
 
 from dotenv import load_dotenv
@@ -14,6 +14,21 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
 dp = Dispatcher()
+
+main_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            KeyboardButton(text="🎟 Взять талон"),
+            KeyboardButton(text="❌ Освободить место"),
+        ],
+        [
+            KeyboardButton(text="📋 Показать очередь"),
+        ],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
+
 queue = []  # список user_id в очереди
 talon_numbers = {}  # user_id -> номер талона
 usernames = {}  # user_id -> username / имя
@@ -107,6 +122,29 @@ async def show_queue(message: Message):
         lines.append(f"{number}. {name}")
 
     await message.answer("Текущая очередь:\n" + "\n".join(lines))
+
+
+@dp.message(Command("start"))
+async def start_handler(message: Message):
+    await message.answer(
+        "Выберите действие:",
+        reply_markup=main_keyboard,
+    )
+
+
+@dp.message(F.text == "🎟 Взять талон")
+async def take_talon_button(message: Message):
+    await take_talon(message, CommandObject(args=None))
+
+
+@dp.message(F.text == "❌ Освободить место")
+async def dismiss_talon_button(message: Message):
+    await dismiss_talon(message)
+
+
+@dp.message(F.text == "📋 Показать очередь")
+async def queue_button(message: Message):
+    await show_queue(message)
 
 
 async def main():

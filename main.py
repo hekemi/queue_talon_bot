@@ -3,7 +3,7 @@ import logging
 import os
 
 from aiogram import Bot, Dispatcher
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from aiogram.exceptions import TelegramUnauthorizedError, TelegramNetworkError
 
@@ -11,6 +11,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 
 dp = Dispatcher()
 queue = []  # список user_id в очереди
+talon_numbers = {}  # user_id -> номер талона
 usernames = {}  # user_id -> username / имя
 
 
@@ -27,22 +28,42 @@ def get_display_name(message: Message) -> str | None:
 
 
 @dp.message(Command("take_talon"))
-async def take_talon(message: Message):
+async def take_talon(message: Message, command: CommandObject):
     if message.from_user is None:
         return
 
     user_id = message.from_user.id
+
+    if user_id in queue:
+        number = talon_numbers[user_id]
+        await message.answer(f"Вы уже в очереди. Ваш талон №{number}")
+        return
+
+    last_number = max(talon_numbers.values(), default=0)
+
+    if command.args:
+        try:
+            number = int(command.args.strip())
+        except ValueError:
+            await message.answer("Используйте номер: /take_talon 5")
+            return
+
+        if number <= last_number:
+            await message.answer(
+                f"Номер должен быть больше последнего талона: {last_number}"
+            )
+            return
+    else:
+        number = last_number + 1
+
+    queue.append(user_id)
+    talon_numbers[user_id] = number
+
     display_name = get_display_name(message)
     if display_name is not None:
         usernames[user_id] = display_name
 
-    if user_id in queue:
-        position = queue.index(user_id) + 1
-        await message.answer(f"Вы уже в очереди. Ваш номер: {position}")
-        return
-
-    queue.append(user_id)
-    await message.answer(f"Вы заняли место в очереди. Ваш номер: {len(queue)}")
+    await message.answer(f"Вы заняли место. Ваш талон №{number}")
 
 
 @dp.message(Command("dismiss_talon"))
@@ -56,9 +77,10 @@ async def dismiss_talon(message: Message):
         await message.answer("У вас нет активного талона.")
         return
 
-    position = queue.index(user_id) + 1
+    number = talon_numbers.pop(user_id)
     queue.remove(user_id)
-    await message.answer(f"Вы вышли из очереди. Ваш талон №{position} отменён.")
+
+    await message.answer(f"Ваш талон №{number} отменён.")
 
 
 @dp.message(Command("queue"))
@@ -67,10 +89,13 @@ async def show_queue(message: Message):
         await message.answer("Очередь пустая.")
         return
 
+    sorted_queue = sorted(queue, key=lambda user_id: talon_numbers[user_id])
     lines = []
-    for i, user_id in enumerate(queue, start=1):
+
+    for user_id in sorted_queue:
+        number = talon_numbers[user_id]
         name = usernames.get(user_id, f"id:{user_id}")
-        lines.append(f"{i}. {name}")
+        lines.append(f"{number}. {name}")
 
     await message.answer("Текущая очередь:\n" + "\n".join(lines))
 

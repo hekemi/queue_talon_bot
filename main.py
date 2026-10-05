@@ -168,12 +168,12 @@ async def main():
         print(f"Не удалось подключиться к Telegram API: {e}")
         await bot.session.close()
         return
-
     try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        print("Старые сообщения удалены. Бот запущен.")
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

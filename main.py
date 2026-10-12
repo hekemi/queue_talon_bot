@@ -245,7 +245,7 @@ async def process_change_talon(message: Message, state: FSMContext):
         return
 
     try:
-        old_number = int(message.text.strip())
+        old_number = int(message.text.strip()) # type: ignore
     except ValueError:
         await message.answer("Введите номер талона числом.")
         return
@@ -267,7 +267,7 @@ async def process_new_talon_number(message: Message, state: FSMContext):
         return
 
     try:
-        new_number = int(message.text.strip())
+        new_number = int(message.text.strip()) # type: ignore
     except ValueError:
         await message.answer("Введите номер талона числом.")
         return
@@ -307,7 +307,7 @@ async def process_delete_talon(message: Message, state: FSMContext):
         return
 
     try:
-        number = int(message.text.strip())
+        number = int(message.text.strip()) # type: ignore
     except ValueError:
         await message.answer("Введите номер талона числом.")
         return

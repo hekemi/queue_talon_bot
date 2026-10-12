@@ -14,15 +14,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TOKEN = os.getenv("BOT_TOKEN")
+dp = Dispatcher(storage=MemoryStorage())
+
 
 class TalonStates(StatesGroup):
     waiting_number = State()
 
-dp = Dispatcher(storage=MemoryStorage())
 
-main_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
+TOKEN = os.getenv("BOT_TOKEN")
+
+ADMIN_USERNAMES = {"hekemi0", "forlornbark113"}
+
+
+def is_admin(message: Message) -> bool:
+    username = message.from_user.username if message.from_user else None
+    return username is not None and username.lower() in ADMIN_USERNAMES
+
+
+def get_main_keyboard(message: Message) -> ReplyKeyboardMarkup:
+    keyboard = [
         [
             KeyboardButton(text="🎟 Взять талон"),
             KeyboardButton(text="❌ Освободить место"),
@@ -30,10 +40,16 @@ main_keyboard = ReplyKeyboardMarkup(
         [
             KeyboardButton(text="📋 Показать очередь"),
         ],
-    ],
-    resize_keyboard=True,
-    is_persistent=True,
-)
+    ]
+
+    if is_admin(message):
+        keyboard.append([KeyboardButton(text="🛠 Редактор очереди")])
+
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 queue = []  # список user_id в очереди
 talon_numbers = {}  # user_id -> номер талона
@@ -158,7 +174,7 @@ async def show_queue(message: Message):
 async def start_handler(message: Message):
     await message.answer(
         "Выберите действие:",
-        reply_markup=main_keyboard,
+        reply_markup=get_main_keyboard(message),
     )
 
 
@@ -179,6 +195,18 @@ async def dismiss_talon_button(message: Message):
 @dp.message(F.text == "📋 Показать очередь")
 async def queue_button(message: Message):
     await show_queue(message)
+
+
+@dp.message(F.text == "🛠 Редактор очереди")
+async def queue_editor_button(message: Message):
+    if not is_admin(message):
+        return
+
+    await message.answer(
+        "🛠 Редактор очереди доступен.\n"
+        "Текущая очередь:",
+        reply_markup=get_main_keyboard(message),
+    )
 
 
 async def main():

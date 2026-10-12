@@ -25,12 +25,15 @@ class EditorStates(StatesGroup):
     waiting_change_talon = State()
     waiting_new_number = State()
     waiting_delete_talon = State()
+    waiting_swap_first = State()
+    waiting_swap_second = State()
 
 
 def get_editor_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="✏️ Изменить номер")],
+            [KeyboardButton(text="🔁 Поменять местами")],
             [KeyboardButton(text="🗑 Удалить из очереди")],
             [KeyboardButton(text="🔄 Обновить очередь")],
             [KeyboardButton(text="↩️ Назад")],
@@ -166,6 +169,8 @@ async def dismiss_talon(message: Message):
 
     number = talon_numbers.pop(user_id)
     queue.remove(user_id)
+
+    normalize_queue_numbers()
 
     await message.answer(f"Ваш талон №{number} отменён.")
 
@@ -317,6 +322,8 @@ async def process_delete_talon(message: Message, state: FSMContext):
     usernames.pop(user_id, None)
     queue.remove(user_id)
 
+    normalize_queue_numbers()
+
     await state.clear()
     await message.answer(
         f"Талон №{number} удалён из очереди.\n\n{get_queue_text()}",
@@ -330,6 +337,68 @@ async def back_from_editor(message: Message, state: FSMContext):
     await message.answer(
         "Выберите действие:",
         reply_markup=get_main_keyboard(message),
+    )
+
+@dp.message(F.text == "🔁 Поменять местами")
+async def start_swap_talons(message: Message, state: FSMContext):
+    if not is_admin(message):
+        return
+
+    await state.set_state(EditorStates.waiting_swap_first)
+    await message.answer("Введите номер первого человека.")
+
+
+@dp.message(EditorStates.waiting_swap_first, F.text)
+async def process_swap_first(message: Message, state: FSMContext):
+    if not is_admin(message) or message.text is None:
+        return
+
+    try:
+        first_number = int(message.text.strip())
+    except ValueError:
+        await message.answer("Введите номер числом.")
+        return
+
+    if find_user_by_talon(first_number) is None:
+        await message.answer("Человек с таким номером не найден.")
+        return
+
+    await state.update_data(first_number=first_number)
+    await state.set_state(EditorStates.waiting_swap_second)
+    await message.answer("Введите номер второго человека.")
+
+
+@dp.message(EditorStates.waiting_swap_second, F.text)
+async def process_swap_second(message: Message, state: FSMContext):
+    if not is_admin(message) or message.text is None:
+        return
+
+    try:
+        second_number = int(message.text.strip())
+    except ValueError:
+        await message.answer("Введите номер числом.")
+        return
+
+    data = await state.get_data()
+    first_number = data["first_number"]
+
+    first_user_id = find_user_by_talon(first_number)
+    second_user_id = find_user_by_talon(second_number)
+
+    if first_user_id is None or second_user_id is None:
+        await message.answer("Один из людей не найден.")
+        return
+
+    talon_numbers[first_user_id], talon_numbers[second_user_id] = (
+        talon_numbers[second_user_id],
+        talon_numbers[first_user_id],
+    )
+
+    await state.clear()
+    await message.answer(
+        f"Люди с номерами {first_number} и {second_number} поменялись местами.\n\n"
+        f"{get_queue_text()}",
+        reply_markup=get_editor_keyboard(),
     )
 
 def get_queue_text() -> str:
@@ -346,6 +415,15 @@ def get_queue_text() -> str:
 
     return "Текущая очередь:\n" + "\n".join(lines)
 
+def normalize_queue_numbers() -> None:
+    """Перенумеровывает очередь с первого номера без пропусков."""
+    ordered_users = sorted(
+        queue,
+        key=lambda user_id: talon_numbers.get(user_id, 0),
+    )
+
+    for number, user_id in enumerate(ordered_users, start=1):
+        talon_numbers[user_id] = number
 
 def find_user_by_talon(number: int) -> int | None:
     for user_id in queue:

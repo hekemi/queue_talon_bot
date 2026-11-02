@@ -31,6 +31,7 @@ class EditorStates(StatesGroup):
 
 OPEN_QUEUE_BUTTON = "🟢 Открыть очередь"
 CLOSE_QUEUE_BUTTON = "🔴 Закрыть очередь"
+CLEAR_QUEUE_BUTTON = "🧹 Очистить очередь"
 
 
 def get_editor_keyboard() -> ReplyKeyboardMarkup:
@@ -44,6 +45,7 @@ def get_editor_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="✏️ Изменить номер")],
             [KeyboardButton(text="🔁 Поменять местами")],
             [KeyboardButton(text="🗑 Удалить из очереди")],
+            [KeyboardButton(text=CLEAR_QUEUE_BUTTON)],
             [KeyboardButton(text="🔄 Обновить очередь")],
             [KeyboardButton(text="↩️ Назад")],
         ],
@@ -213,6 +215,25 @@ async def close_queue_command(message: Message):
     await set_queue_status(message, False)
 
 
+@dp.message(Command("clear_queue"))
+async def clear_queue_command(message: Message):
+    if not is_admin(message):
+        return
+
+    if not queue:
+        await message.answer("Очередь уже пустая.", reply_markup=get_editor_keyboard())
+        return
+
+    queue.clear()
+    talon_numbers.clear()
+    usernames.clear()
+
+    await message.answer(
+        "Очередь успешно очищена.",
+        reply_markup=get_editor_keyboard(),
+    )
+
+
 @dp.message(Command("queue"))
 async def show_queue(message: Message):
     await message.answer(get_queue_text())
@@ -274,6 +295,11 @@ async def open_queue_button(message: Message):
 @dp.message(F.text == CLOSE_QUEUE_BUTTON)
 async def close_queue_button(message: Message):
     await set_queue_status(message, False)
+
+
+@dp.message(F.text == CLEAR_QUEUE_BUTTON)
+async def clear_queue_button(message: Message):
+    await clear_queue_command(message)
 
 
 @dp.message(F.text == "✏️ Изменить номер")

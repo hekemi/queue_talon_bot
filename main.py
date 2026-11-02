@@ -29,9 +29,18 @@ class EditorStates(StatesGroup):
     waiting_swap_second = State()
 
 
+OPEN_QUEUE_BUTTON = "🟢 Открыть очередь"
+CLOSE_QUEUE_BUTTON = "🔴 Закрыть очередь"
+
+
 def get_editor_keyboard() -> ReplyKeyboardMarkup:
+    queue_control_button = (
+        CLOSE_QUEUE_BUTTON if queue_is_open else OPEN_QUEUE_BUTTON
+    )
+
     return ReplyKeyboardMarkup(
         keyboard=[
+            [KeyboardButton(text=queue_control_button)],
             [KeyboardButton(text="✏️ Изменить номер")],
             [KeyboardButton(text="🔁 Поменять местами")],
             [KeyboardButton(text="🗑 Удалить из очереди")],
@@ -75,6 +84,7 @@ def get_main_keyboard(message: Message) -> ReplyKeyboardMarkup:
 queue = []  # список user_id в очереди
 talon_numbers = {}  # user_id -> номер талона
 usernames = {}  # user_id -> username / имя
+queue_is_open = True
 
 
 def get_display_name(message: Message) -> str | None:
@@ -94,6 +104,10 @@ async def add_talon(message: Message, number: int):
         return
 
     user_id = message.from_user.id
+
+    if not queue_is_open and not is_admin(message):
+        await message.answer("Очередь закрыта для новых участников.")
+        return
 
     if user_id in talon_numbers:
         await message.answer(
@@ -175,6 +189,30 @@ async def dismiss_talon(message: Message):
     await message.answer(f"Ваш талон №{number} отменён.")
 
 
+async def set_queue_status(message: Message, is_open: bool):
+    global queue_is_open
+
+    if not is_admin(message):
+        return
+
+    queue_is_open = is_open
+    status = "открыта" if is_open else "закрыта"
+    await message.answer(
+        f"Очередь {status} для новых участников.",
+        reply_markup=get_editor_keyboard(),
+    )
+
+
+@dp.message(Command("open_queue"))
+async def open_queue_command(message: Message):
+    await set_queue_status(message, True)
+
+
+@dp.message(Command("close_queue"))
+async def close_queue_command(message: Message):
+    await set_queue_status(message, False)
+
+
 @dp.message(Command("queue"))
 async def show_queue(message: Message):
     await message.answer(get_queue_text())
@@ -226,6 +264,16 @@ async def refresh_editor_queue(message: Message):
             get_queue_text(),
             reply_markup=get_editor_keyboard(),
         )
+
+
+@dp.message(F.text == OPEN_QUEUE_BUTTON)
+async def open_queue_button(message: Message):
+    await set_queue_status(message, True)
+
+
+@dp.message(F.text == CLOSE_QUEUE_BUTTON)
+async def close_queue_button(message: Message):
+    await set_queue_status(message, False)
 
 
 @dp.message(F.text == "✏️ Изменить номер")

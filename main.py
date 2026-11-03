@@ -19,6 +19,7 @@ dp = Dispatcher(storage=MemoryStorage())
 
 class TalonStates(StatesGroup):
     waiting_number = State()
+    waiting_dismiss_confirmation = State()
 
 
 class EditorStates(StatesGroup):
@@ -32,6 +33,8 @@ class EditorStates(StatesGroup):
 OPEN_QUEUE_BUTTON = "🟢 Открыть очередь"
 CLOSE_QUEUE_BUTTON = "🔴 Закрыть очередь"
 CLEAR_QUEUE_BUTTON = "🧹 Очистить очередь"
+CONFIRM_DISMISS_BUTTON = "✅ Да, выйти"
+CANCEL_DISMISS_BUTTON = "↩️ Нет, остаться"
 
 
 def get_editor_keyboard() -> ReplyKeyboardMarkup:
@@ -86,6 +89,20 @@ def get_main_keyboard(message: Message) -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         is_persistent=True,
     )
+
+
+def get_dismiss_confirmation_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text=CONFIRM_DISMISS_BUTTON),
+                KeyboardButton(text=CANCEL_DISMISS_BUTTON),
+            ],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
 
 queue = []  # список user_id в очереди
 talon_numbers = {}  # user_id -> номер талона
@@ -144,6 +161,7 @@ async def add_talon(message: Message, number: int):
     await message.answer(f"Вы заняли место. Ваш талон №{number}")
 
 
+# Это обработчик команды /take_talon. Нужен для работы с inline
 @dp.message(Command("take_talon"))
 async def take_talon(message: Message, command: CommandObject):
     if not command.args:
@@ -166,6 +184,10 @@ async def process_talon_number(message: Message, state: FSMContext):
         await message.answer("Введите номер талона числом.")
         return
 
+    if text == "❌ Освободить место":
+        await request_dismiss_talon(message, state)
+        return
+
     try:
         number = int(text.strip())
     except ValueError:
@@ -176,15 +198,40 @@ async def process_talon_number(message: Message, state: FSMContext):
     await state.clear()
 
 
-@dp.message(Command("dismiss_talon"))
-async def dismiss_talon(message: Message):
+async def request_dismiss_talon(message: Message, state: FSMContext):
     if message.from_user is None:
         return
 
     user_id = message.from_user.id
 
     if user_id not in queue:
-        await message.answer("У вас нет активного талона.")
+        await state.clear()
+        await message.answer(
+            "У вас нет активного талона.",
+            reply_markup=get_main_keyboard(message),
+        )
+        return
+
+    await state.clear()
+    await state.set_state(TalonStates.waiting_dismiss_confirmation)
+    await message.answer(
+        "Вы действительно хотите выйти из очереди?",
+        reply_markup=get_dismiss_confirmation_keyboard(),
+    )
+
+
+async def remove_talon(message: Message, state: FSMContext):
+    if message.from_user is None:
+        return
+
+    user_id = message.from_user.id
+
+    if user_id not in queue:
+        await state.clear()
+        await message.answer(
+            "У вас нет активного талона.",
+            reply_markup=get_main_keyboard(message),
+        )
         return
 
     number = talon_numbers.pop(user_id)
@@ -192,7 +239,16 @@ async def dismiss_talon(message: Message):
 
     normalize_queue_numbers()
 
-    await message.answer(f"Ваш талон №{number} отменён.")
+    await state.clear()
+    await message.answer(
+        f"Ваш талон №{number} отменён.",
+        reply_markup=get_main_keyboard(message),
+    )
+
+
+@dp.message(Command("dismiss_talon"))
+async def dismiss_talon_command(message: Message, state: FSMContext):
+    await request_dismiss_talon(message, state)
 
 
 async def set_queue_status(message: Message, is_open: bool):
@@ -253,16 +309,31 @@ async def start_handler(message: Message):
 
 @dp.message(F.text == "🎟 Взять талон")
 async def take_talon_button(message: Message, state: FSMContext):
+    await show_queue(message)
     await state.set_state(TalonStates.waiting_number)
     await message.answer(
-        "Введите желаемый номер талона.\n"
+        f"Введите желаемый номер талона.\n"
         "Введите 0, чтобы занять ближайшее свободное место."
     )
 
 
 @dp.message(F.text == "❌ Освободить место")
-async def dismiss_talon_button(message: Message):
-    await dismiss_talon(message)
+async def dismiss_talon_button(message: Message, state: FSMContext):
+    await request_dismiss_talon(message, state)
+
+
+@dp.message(TalonStates.waiting_dismiss_confirmation, F.text == CONFIRM_DISMISS_BUTTON)
+async def confirm_dismiss_talon(message: Message, state: FSMContext):
+    await remove_talon(message, state)
+
+
+@dp.message(TalonStates.waiting_dismiss_confirmation, F.text == CANCEL_DISMISS_BUTTON)
+async def cancel_dismiss_talon(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Вы остались в очереди.",
+        reply_markup=get_main_keyboard(message),
+    )
 
 
 @dp.message(F.text == "📋 Показать очередь")

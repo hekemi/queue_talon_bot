@@ -47,6 +47,15 @@ SCHEDULE_CLOSE_BUTTON = "🔴 Закрыть очередь"
 SCHEDULE_BACK_BUTTON = "↩️ Назад к редактору"
 CONFIRM_DISMISS_BUTTON = "✅ Да, выйти"
 CANCEL_DISMISS_BUTTON = "↩️ Нет, остаться"
+CHANGE_TALONNUM_BUTTON = "✏️ Изменить номер"
+SWITCH_PLACES_BUTTON = "🔁 Поменять местами"
+REMOVE_FROM_QUEUE_BUTTON = "🗑 Удалить из очереди"
+UPDATE_QUEUE_BUTTON = "🔄 Обновить очередь"
+QUEUE_REDACTOR_BUTTON = "🛠 Редактор очереди"
+TAKE_TALON_BUTTON = "🎟 Взять талон"
+RELEASE_PLACE_BUTTON = "❌ Освободить место"
+SHOW_QUEUE_BUTTON = "📋 Показать очередь"
+
 
 
 def get_editor_keyboard() -> ReplyKeyboardMarkup:
@@ -55,14 +64,22 @@ def get_editor_keyboard() -> ReplyKeyboardMarkup:
     )
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=queue_control_button)],
-            [KeyboardButton(text="✏️ Изменить номер")],
-            [KeyboardButton(text="🔁 Поменять местами")],
-            [KeyboardButton(text="🗑 Удалить из очереди")],
-            [KeyboardButton(text=CLEAR_QUEUE_BUTTON)],
-            [KeyboardButton(text=SCHEDULE_QUEUE_BUTTON)],
-            [KeyboardButton(text=CANCEL_SCHEDULE_BUTTON)],
-            [KeyboardButton(text="🔄 Обновить очередь")],
+            [
+                KeyboardButton(text=queue_control_button),
+                KeyboardButton(text=UPDATE_QUEUE_BUTTON),
+            ],
+            [
+                KeyboardButton(text=CHANGE_TALONNUM_BUTTON),
+                KeyboardButton(text=SWITCH_PLACES_BUTTON),
+            ],
+            [
+                KeyboardButton(text=REMOVE_FROM_QUEUE_BUTTON),
+                KeyboardButton(text=CLEAR_QUEUE_BUTTON),
+            ],
+            [
+                KeyboardButton(text=SCHEDULE_QUEUE_BUTTON),
+                KeyboardButton(text=CANCEL_SCHEDULE_BUTTON),
+            ],
             [KeyboardButton(text="↩️ Назад")],
         ],
         resize_keyboard=True,
@@ -110,16 +127,16 @@ def is_admin(message: Message) -> bool:
 def get_main_keyboard(message: Message) -> ReplyKeyboardMarkup:
     keyboard = [
         [
-            KeyboardButton(text="🎟 Взять талон"),
-            KeyboardButton(text="❌ Освободить место"),
+            KeyboardButton(text=TAKE_TALON_BUTTON),
+            KeyboardButton(text=RELEASE_PLACE_BUTTON),
         ],
         [
-            KeyboardButton(text="📋 Показать очередь"),
+            KeyboardButton(text=SHOW_QUEUE_BUTTON),
         ],
     ]
 
     if is_admin(message):
-        keyboard.append([KeyboardButton(text="🛠 Редактор очереди")])
+        keyboard.append([KeyboardButton(text=QUEUE_REDACTOR_BUTTON)])
 
     return ReplyKeyboardMarkup(
         keyboard=keyboard,

@@ -55,7 +55,11 @@ def get_editor_keyboard() -> ReplyKeyboardMarkup:
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-ADMIN_USERNAMES = {"hekemi0", "forlornbark113"}
+ADMIN_USERNAMES = {
+    username.strip().lstrip("@").lower()
+    for username in os.getenv("ADMIN_USERNAMES", "").split(",")
+    if username.strip()
+}
 
 
 def is_admin(message: Message) -> bool:

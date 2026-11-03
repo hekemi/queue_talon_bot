@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
@@ -28,11 +29,14 @@ class EditorStates(StatesGroup):
     waiting_delete_talon = State()
     waiting_swap_first = State()
     waiting_swap_second = State()
+    waiting_schedule_input = State()
 
 
 OPEN_QUEUE_BUTTON = "🟢 Открыть очередь"
 CLOSE_QUEUE_BUTTON = "🔴 Закрыть очередь"
 CLEAR_QUEUE_BUTTON = "🧹 Очистить очередь"
+SCHEDULE_QUEUE_BUTTON = "⏰ Запланировать очередь"
+CANCEL_SCHEDULE_BUTTON = "❌ Отменить расписание"
 CONFIRM_DISMISS_BUTTON = "✅ Да, выйти"
 CANCEL_DISMISS_BUTTON = "↩️ Нет, остаться"
 
@@ -49,6 +53,8 @@ def get_editor_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔁 Поменять местами")],
             [KeyboardButton(text="🗑 Удалить из очереди")],
             [KeyboardButton(text=CLEAR_QUEUE_BUTTON)],
+            [KeyboardButton(text=SCHEDULE_QUEUE_BUTTON)],
+            [KeyboardButton(text=CANCEL_SCHEDULE_BUTTON)],
             [KeyboardButton(text="🔄 Обновить очередь")],
             [KeyboardButton(text="↩️ Назад")],
         ],
@@ -108,6 +114,8 @@ queue = []  # список user_id в очереди
 talon_numbers = {}  # user_id -> номер талона
 usernames = {}  # user_id -> username / имя
 queue_is_open = True
+queue_schedule_tasks: dict[str, asyncio.Task] = {}
+queue_schedule_labels: dict[str, str] = {}
 
 
 def get_display_name(message: Message) -> str | None:
@@ -257,12 +265,172 @@ async def set_queue_status(message: Message, is_open: bool):
     if not is_admin(message):
         return
 
-    queue_is_open = is_open
+    apply_queue_status(is_open)
     status = "открыта" if is_open else "закрыта"
     await message.answer(
         f"Очередь {status} для новых участников.",
         reply_markup=get_editor_keyboard(),
     )
+
+
+def apply_queue_status(is_open: bool) -> None:
+    global queue_is_open
+    queue_is_open = is_open
+
+
+def cancel_queue_schedule(action: str) -> bool:
+    task = queue_schedule_tasks.pop(action, None)
+    queue_schedule_labels.pop(action, None)
+    if task is None:
+        return False
+    task.cancel()
+    return True
+
+
+def schedule_queue_action(action: str, delay: float, label: str) -> None:
+    cancel_queue_schedule(action)
+
+    async def run_scheduled_action() -> None:
+        try:
+            await asyncio.sleep(delay)
+            apply_queue_status(action == "open")
+            queue_schedule_tasks.pop(action, None)
+            queue_schedule_labels.pop(action, None)
+            logging.info("Очередь автоматически %s.", "открыта" if action == "open" else "закрыта")
+        except asyncio.CancelledError:
+            raise
+
+    queue_schedule_labels[action] = label
+    queue_schedule_tasks[action] = asyncio.create_task(run_scheduled_action())
+
+
+def parse_schedule_request(text: str) -> tuple[str, float, str] | None:
+    parts = text.strip().split(maxsplit=3)
+    if len(parts) < 3:
+        return None
+
+    schedule_type, action = parts[0].lower(), parts[1].lower()
+    action_aliases = {"открыть": "open", "закрыть": "close", "open": "open", "close": "close"}
+    action = action_aliases.get(action, "")
+    if schedule_type in {"таймер", "timer"}:
+        if action not in {"open", "close"}:
+            return None
+        try:
+            minutes = float(parts[2].replace(",", "."))
+        except ValueError:
+            return None
+        if minutes <= 0:
+            return None
+        return action, minutes * 60, f"через {minutes:g} мин."
+
+    if schedule_type not in {"дата", "date"} or action not in {"open", "close"} or len(parts) < 4:
+        return None
+
+    try:
+        scheduled_at = datetime.strptime(
+            f"{parts[2]} {parts[3]}",
+            "%d.%m.%Y %H:%M",
+        ).astimezone()
+    except ValueError:
+        try:
+            scheduled_at = datetime.strptime(
+                f"{parts[2]} {parts[3]}",
+                "%Y-%m-%d %H:%M",
+            ).astimezone()
+        except ValueError:
+            return None
+
+    delay = (scheduled_at - datetime.now().astimezone()).total_seconds()
+    if delay <= 0:
+        return None
+    return action, delay, scheduled_at.strftime("%d.%m.%Y %H:%M %Z")
+
+
+async def schedule_queue_from_text(message: Message, text: str) -> None:
+    if not is_admin(message):
+        return
+
+    parsed = parse_schedule_request(text)
+    if parsed is None:
+        await message.answer(
+            "Не удалось распознать расписание.\n"
+            "Примеры:\n"
+            "таймер открыть 30\n"
+            "таймер закрыть 15\n"
+            "дата открыть 03.11.2026 19:00\n"
+            "дата закрыть 03.11.2026 20:00"
+        )
+        return
+
+    action, delay, label = parsed
+    schedule_queue_action(action, delay, label)
+    status = "открытие" if action == "open" else "закрытие"
+    await message.answer(
+        f"Запланировано {status} очереди {label}.",
+        reply_markup=get_editor_keyboard(),
+    )
+
+
+def get_queue_schedule_text() -> str:
+    if not queue_schedule_labels:
+        return "Активных расписаний нет."
+    lines = [
+        f"{'Открытие' if action == 'open' else 'Закрытие'}: {label}"
+        for action, label in queue_schedule_labels.items()
+    ]
+    return "Активные расписания:\n" + "\n".join(lines)
+
+
+@dp.message(Command("schedule_queue"))
+async def schedule_queue_command(message: Message, command: CommandObject):
+    if not command.args:
+        await message.answer(
+            "Используйте:\n"
+            "/schedule_queue timer open 30\n"
+            "/schedule_queue timer close 15\n"
+            "/schedule_queue date open 03.11.2026 19:00\n"
+            "/schedule_queue date close 03.11.2026 20:00"
+        )
+        return
+    await schedule_queue_from_text(message, command.args)
+
+
+@dp.message(Command("cancel_schedule"))
+async def cancel_schedule_command(message: Message):
+    if not is_admin(message):
+        return
+    cancelled = sum(
+        cancel_queue_schedule(action) for action in ("open", "close")
+    )
+    text = "Расписания отменены." if cancelled else "Активных расписаний нет."
+    await message.answer(text, reply_markup=get_editor_keyboard())
+
+
+@dp.message(F.text == SCHEDULE_QUEUE_BUTTON)
+async def schedule_queue_button(message: Message, state: FSMContext):
+    if not is_admin(message):
+        return
+    await state.set_state(EditorStates.waiting_schedule_input)
+    await message.answer(
+        "Введите расписание одной строкой:\n"
+        "таймер открыть 30 — открыть через 30 минут\n"
+        "таймер закрыть 15 — закрыть через 15 минут\n"
+        "дата открыть 03.11.2026 19:00\n"
+        "дата закрыть 03.11.2026 20:00"
+    )
+
+
+@dp.message(EditorStates.waiting_schedule_input, F.text)
+async def process_schedule_input(message: Message, state: FSMContext):
+    if message.text is None:
+        return
+    await schedule_queue_from_text(message, message.text)
+    await state.clear()
+
+
+@dp.message(F.text == CANCEL_SCHEDULE_BUTTON)
+async def cancel_schedule_button(message: Message):
+    await cancel_schedule_command(message)
 
 
 @dp.message(Command("open_queue"))

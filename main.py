@@ -237,7 +237,7 @@ async def remove_talon(message: Message, state: FSMContext):
     number = talon_numbers.pop(user_id)
     queue.remove(user_id)
 
-    normalize_queue_numbers()
+    normalize_after_delete(number)
 
     await state.clear()
     await message.answer(
@@ -471,7 +471,7 @@ async def process_delete_talon(message: Message, state: FSMContext):
     usernames.pop(user_id, None)
     queue.remove(user_id)
 
-    normalize_queue_numbers()
+    normalize_after_delete(number)
 
     await state.clear()
     await message.answer(
@@ -564,15 +564,26 @@ def get_queue_text() -> str:
 
     return "Текущая очередь:\n" + "\n".join(lines)
 
-def normalize_queue_numbers() -> None:
-    """Перенумеровывает очередь с первого номера без пропусков."""
-    ordered_users = sorted(
-        queue,
-        key=lambda user_id: talon_numbers.get(user_id, 0),
+def normalize_after_delete(deleted_number: int) -> None:
+    """Убирает только блок пустот перед ближайшим следующим занятым номером.
+
+    Примеры:
+    - 1,2,4 после удаления 1 -> 1,3
+    - 1,3,4 после удаления 1 -> 1,2
+    """
+    next_occupied = min(
+        (number for number in talon_numbers.values() if number > deleted_number),
+        default=None,
     )
 
-    for number, user_id in enumerate(ordered_users, start=1):
-        talon_numbers[user_id] = number
+    if next_occupied is None:
+        return
+
+    shift = next_occupied - deleted_number
+
+    for user_id, number in list(talon_numbers.items()):
+        if number >= next_occupied:
+            talon_numbers[user_id] = number - shift
 
 def find_user_by_talon(number: int) -> int | None:
     for user_id in queue:

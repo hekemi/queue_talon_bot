@@ -257,8 +257,7 @@ async def take_talon_button(message: Message, state: FSMContext):
     await show_queue(message)
     await state.set_state(TalonStates.waiting_number)
     await message.answer(
-        f"{get_queue_text()}\n\n"
-        "Введите желаемый номер талона.\n"
+        f"Введите желаемый номер талона.\n"
         "Введите 0, чтобы занять ближайшее свободное место."
     )
 

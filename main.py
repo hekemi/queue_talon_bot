@@ -29,14 +29,22 @@ class EditorStates(StatesGroup):
     waiting_delete_talon = State()
     waiting_swap_first = State()
     waiting_swap_second = State()
-    waiting_schedule_input = State()
+    waiting_schedule_type = State()
+    waiting_schedule_action = State()
+    waiting_schedule_timer = State()
+    waiting_schedule_date = State()
 
 
 OPEN_QUEUE_BUTTON = "🟢 Открыть очередь"
 CLOSE_QUEUE_BUTTON = "🔴 Закрыть очередь"
 CLEAR_QUEUE_BUTTON = "🧹 Очистить очередь"
-SCHEDULE_QUEUE_BUTTON = "⏰ Запланировать очередь"
+SCHEDULE_QUEUE_BUTTON = "⏰ Планировщик"
 CANCEL_SCHEDULE_BUTTON = "❌ Отменить расписание"
+SCHEDULE_TIMER_BUTTON = "⏱ Таймер"
+SCHEDULE_DATE_BUTTON = "📅 По дате и времени"
+SCHEDULE_OPEN_BUTTON = "🟢 Открыть очередь"
+SCHEDULE_CLOSE_BUTTON = "🔴 Закрыть очередь"
+SCHEDULE_BACK_BUTTON = "↩️ Назад к редактору"
 CONFIRM_DISMISS_BUTTON = "✅ Да, выйти"
 CANCEL_DISMISS_BUTTON = "↩️ Нет, остаться"
 
@@ -45,7 +53,6 @@ def get_editor_keyboard() -> ReplyKeyboardMarkup:
     queue_control_button = (
         CLOSE_QUEUE_BUTTON if queue_is_open else OPEN_QUEUE_BUTTON
     )
-
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=queue_control_button)],
@@ -57,6 +64,30 @@ def get_editor_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=CANCEL_SCHEDULE_BUTTON)],
             [KeyboardButton(text="🔄 Обновить очередь")],
             [KeyboardButton(text="↩️ Назад")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def get_schedule_type_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=SCHEDULE_TIMER_BUTTON)],
+            [KeyboardButton(text=SCHEDULE_DATE_BUTTON)],
+            [KeyboardButton(text=SCHEDULE_BACK_BUTTON)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def get_schedule_action_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=SCHEDULE_OPEN_BUTTON)],
+            [KeyboardButton(text=SCHEDULE_CLOSE_BUTTON)],
+            [KeyboardButton(text=SCHEDULE_BACK_BUTTON)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -346,25 +377,16 @@ def parse_schedule_request(text: str) -> tuple[str, float, str] | None:
     return action, delay, scheduled_at.strftime("%d.%m.%Y %H:%M %Z")
 
 
-async def schedule_queue_from_text(message: Message, text: str) -> None:
-    if not is_admin(message):
-        return
-
-    parsed = parse_schedule_request(text)
-    if parsed is None:
-        await message.answer(
-            "Не удалось распознать расписание.\n"
-            "Примеры:\n"
-            "таймер открыть 30\n"
-            "таймер закрыть 15\n"
-            "дата открыть 03.11.2026 19:00\n"
-            "дата закрыть 03.11.2026 20:00"
-        )
-        return
-
-    action, delay, label = parsed
+async def finish_schedule(
+    message: Message,
+    state: FSMContext,
+    action: str,
+    delay: float,
+    label: str,
+) -> None:
     schedule_queue_action(action, delay, label)
     status = "открытие" if action == "open" else "закрытие"
+    await state.clear()
     await message.answer(
         f"Запланировано {status} очереди {label}.",
         reply_markup=get_editor_keyboard(),
@@ -382,7 +404,11 @@ def get_queue_schedule_text() -> str:
 
 
 @dp.message(Command("schedule_queue"))
-async def schedule_queue_command(message: Message, command: CommandObject):
+async def schedule_queue_command(
+    message: Message,
+    command: CommandObject,
+    state: FSMContext,
+):
     if not command.args:
         await message.answer(
             "Используйте:\n"
@@ -392,7 +418,14 @@ async def schedule_queue_command(message: Message, command: CommandObject):
             "/schedule_queue date close 03.11.2026 20:00"
         )
         return
-    await schedule_queue_from_text(message, command.args)
+    if not is_admin(message):
+        return
+    parsed = parse_schedule_request(command.args)
+    if parsed is None:
+        await message.answer("Не удалось распознать расписание. Проверьте формат команды.")
+        return
+    action, delay, label = parsed
+    await finish_schedule(message, state, action, delay, label)
 
 
 @dp.message(Command("cancel_schedule"))
@@ -410,22 +443,85 @@ async def cancel_schedule_command(message: Message):
 async def schedule_queue_button(message: Message, state: FSMContext):
     if not is_admin(message):
         return
-    await state.set_state(EditorStates.waiting_schedule_input)
+    await state.set_state(EditorStates.waiting_schedule_type)
     await message.answer(
-        "Введите расписание одной строкой:\n"
-        "таймер открыть 30 — открыть через 30 минут\n"
-        "таймер закрыть 15 — закрыть через 15 минут\n"
-        "дата открыть 03.11.2026 19:00\n"
-        "дата закрыть 03.11.2026 20:00"
+        "Как запланировать изменение очереди?",
+        reply_markup=get_schedule_type_keyboard(),
     )
 
 
-@dp.message(EditorStates.waiting_schedule_input, F.text)
-async def process_schedule_input(message: Message, state: FSMContext):
+@dp.message(EditorStates.waiting_schedule_type, F.text == SCHEDULE_TIMER_BUTTON)
+async def choose_schedule_timer(message: Message, state: FSMContext):
+    await state.update_data(schedule_type="timer")
+    await state.set_state(EditorStates.waiting_schedule_action)
+    await message.answer("Что сделать по таймеру?", reply_markup=get_schedule_action_keyboard())
+
+
+@dp.message(EditorStates.waiting_schedule_type, F.text == SCHEDULE_DATE_BUTTON)
+async def choose_schedule_date(message: Message, state: FSMContext):
+    await state.update_data(schedule_type="date")
+    await state.set_state(EditorStates.waiting_schedule_action)
+    await message.answer("Что сделать по дате?", reply_markup=get_schedule_action_keyboard())
+
+
+@dp.message(EditorStates.waiting_schedule_action, F.text.in_({SCHEDULE_OPEN_BUTTON, SCHEDULE_CLOSE_BUTTON}))
+async def choose_schedule_action(message: Message, state: FSMContext):
+    action = "open" if message.text == SCHEDULE_OPEN_BUTTON else "close"
+    data = await state.get_data()
+    await state.update_data(action=action)
+    if data.get("schedule_type") == "timer":
+        await state.set_state(EditorStates.waiting_schedule_timer)
+        await message.answer("Через сколько минут изменить очередь? Введите положительное число.")
+    else:
+        await state.set_state(EditorStates.waiting_schedule_date)
+        await message.answer(
+            "Введите дату и время в формате ДД.ММ.ГГГГ ЧЧ:ММ\n"
+            "Например: 03.11.2026 19:00"
+        )
+
+
+@dp.message(EditorStates.waiting_schedule_timer, F.text)
+async def process_schedule_timer(message: Message, state: FSMContext):
     if message.text is None:
         return
-    await schedule_queue_from_text(message, message.text)
+    try:
+        minutes = float(message.text.strip().replace(",", "."))
+    except ValueError:
+        await message.answer("Введите количество минут числом.")
+        return
+    if minutes <= 0:
+        await message.answer("Количество минут должно быть больше нуля.")
+        return
+    data = await state.get_data()
+    await finish_schedule(
+        message,
+        state,
+        data["action"],
+        minutes * 60,
+        f"через {minutes:g} мин.",
+    )
+
+
+@dp.message(EditorStates.waiting_schedule_date, F.text)
+async def process_schedule_date(message: Message, state: FSMContext):
+    if message.text is None:
+        return
+    data = await state.get_data()
+    parsed = parse_schedule_request(f"дата {data['action']} {message.text}")
+    if parsed is None:
+        await message.answer(
+            "Не удалось распознать дату. Используйте формат ДД.ММ.ГГГГ ЧЧ:ММ "
+            "и укажите дату в будущем."
+        )
+        return
+    action, delay, label = parsed
+    await finish_schedule(message, state, action, delay, label)
+
+
+@dp.message(F.text == SCHEDULE_BACK_BUTTON)
+async def back_from_scheduler(message: Message, state: FSMContext):
     await state.clear()
+    await message.answer("Редактор очереди.", reply_markup=get_editor_keyboard())
 
 
 @dp.message(F.text == CANCEL_SCHEDULE_BUTTON)

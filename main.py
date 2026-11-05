@@ -150,6 +150,24 @@ def assign_user_to_group(message: Message, group_id: int) -> None:
     )
 
 
+def release_user_from_group_queue(user_id: int, group_id: int) -> None:
+    group = group_queues.get(group_id)
+    if group is None or user_id not in group.queue:
+        return
+
+    number = group.talon_numbers.pop(user_id)
+    group.queue.remove(user_id)
+    group.usernames.pop(user_id, None)
+    normalize_after_delete(group, number)
+
+
+def switch_user_group(user_id: int, username: str, group_id: int) -> None:
+    current_group_id = get_user_group_id(user_id)
+    if current_group_id is not None:
+        release_user_from_group_queue(user_id, current_group_id)
+    assign_user_id_to_group(user_id, username, group_id)
+
+
 def create_group(name: str) -> int | None:
     normalized_name = " ".join(name.split())
     if not normalized_name:
@@ -807,7 +825,7 @@ async def group_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Группа больше не существует.", show_alert=True)
         return
 
-    assign_user_id_to_group(
+    switch_user_group(
         callback.from_user.id,
         callback.from_user.username
         or callback.from_user.full_name
@@ -832,7 +850,14 @@ async def process_group_name(message: Message, state: FSMContext):
     if group_id is None:
         await message.answer("Группа с таким названием уже существует или имя пустое.")
         return
-    assign_user_to_group(message, group_id)
+    if message.from_user is not None:
+        switch_user_group(
+            message.from_user.id,
+            message.from_user.username
+            or message.from_user.full_name
+            or str(message.from_user.id),
+            group_id,
+        )
     await state.clear()
     await message.answer(
         f"Группа «{get_group_name(group_id)}» создана.",

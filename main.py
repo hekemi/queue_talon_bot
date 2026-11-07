@@ -21,6 +21,7 @@ dp = Dispatcher(storage=MemoryStorage())
 class TalonStates(StatesGroup):
     waiting_number = State()
     waiting_dismiss_confirmation = State()
+    waiting_swap_target = State()
 
 
 class EditorStates(StatesGroup):
@@ -162,12 +163,45 @@ def get_dismiss_confirmation_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def get_swap_targets_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    buttons = [
+        KeyboardButton(text=str(talon_numbers[target_user_id]))
+        for target_user_id in sorted(
+            queue,
+            key=lambda participant_id: talon_numbers[participant_id],
+        )
+        if target_user_id != user_id
+    ]
+    rows = [[button] for button in buttons]
+    rows.append([KeyboardButton(text=BACK_USER_BUTTON)])
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def get_swap_confirmation_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text=CONFIRM_BUTTON),
+                KeyboardButton(text=CANCEL_BUTTON),
+            ],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
 queue = []  # список user_id в очереди
 talon_numbers = {}  # user_id -> номер талона
 usernames = {}  # user_id -> username / имя
 queue_is_open = True
 queue_schedule_tasks: dict[str, asyncio.Task] = {}
 queue_schedule_labels: dict[str, str] = {}
+swap_requests: dict[int, tuple[int, int, int]] = {}
+swap_requesters: dict[int, int] = {}
 
 
 def get_display_name(message: Message) -> str | None:
@@ -180,6 +214,11 @@ def get_display_name(message: Message) -> str | None:
     if user.full_name:
         return user.full_name
     return str(user.id)
+
+
+def clear_swap_request(requester_id: int, target_id: int) -> None:
+    swap_requests.pop(target_id, None)
+    swap_requesters.pop(requester_id, None)
 
 
 async def add_talon(message: Message, number: int):
@@ -296,6 +335,12 @@ async def remove_talon(message: Message, state: FSMContext):
 
     number = talon_numbers.pop(user_id)
     queue.remove(user_id)
+    target_id = swap_requesters.get(user_id)
+    if target_id is not None:
+        clear_swap_request(user_id, target_id)
+    request = swap_requests.get(user_id)
+    if request is not None:
+        clear_swap_request(request[0], user_id)
 
     normalize_after_delete(number)
 
@@ -572,6 +617,8 @@ async def clear_queue_command(message: Message):
     queue.clear()
     talon_numbers.clear()
     usernames.clear()
+    swap_requests.clear()
+    swap_requesters.clear()
 
     await message.answer(
         "Очередь успешно очищена.",
@@ -599,6 +646,154 @@ async def take_talon_button(message: Message, state: FSMContext):
     await message.answer(
         f"Введите желаемый номер талона.\n"
         "Введите 0, чтобы занять ближайшее свободное место."
+    )
+
+
+@dp.message(F.text == SWITCH_PLACES_USER_BUTTON)
+async def start_user_swap(message: Message, state: FSMContext):
+    if message.from_user is None:
+        return
+
+    user_id = message.from_user.id
+    if user_id not in talon_numbers:
+        await message.answer(
+            "Сначала займите место в очереди.",
+            reply_markup=get_main_keyboard(message),
+        )
+        return
+
+    available_targets = [
+        participant_id for participant_id in queue if participant_id != user_id
+    ]
+    if not available_targets:
+        await message.answer("Сейчас не с кем меняться местами.")
+        return
+
+    await state.set_state(TalonStates.waiting_swap_target)
+    await message.answer(
+        f"{get_queue_text()}\n\nВыберите номер, с владельцем которого хотите поменяться.",
+        reply_markup=get_swap_targets_keyboard(user_id),
+    )
+
+
+@dp.message(TalonStates.waiting_swap_target, F.text == BACK_USER_BUTTON)
+async def cancel_user_swap(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Обмен отменён.",
+        reply_markup=get_main_keyboard(message),
+    )
+
+
+@dp.message(TalonStates.waiting_swap_target, F.text)
+async def process_user_swap_target(message: Message, state: FSMContext):
+    if message.from_user is None or message.text is None:
+        return
+
+    requester_id = message.from_user.id
+    try:
+        target_number = int(message.text.strip())
+    except ValueError:
+        await message.answer("Выберите номер кнопкой ниже.")
+        return
+
+    requester_number = talon_numbers.get(requester_id)
+    target_id = find_user_by_talon(target_number)
+    if requester_number is None:
+        await state.clear()
+        await message.answer(
+            "У вас больше нет места в очереди.",
+            reply_markup=get_main_keyboard(message),
+        )
+        return
+    if target_id is None or target_id == requester_id:
+        await message.answer(
+            "Это место уже недоступно. Выберите другой номер.",
+            reply_markup=get_swap_targets_keyboard(requester_id),
+        )
+        return
+    if target_id in swap_requests:
+        await message.answer(
+            "Владелец этого места уже рассматривает другой запрос. "
+            "Выберите другой номер.",
+            reply_markup=get_swap_targets_keyboard(requester_id),
+        )
+        return
+    if requester_id in swap_requesters:
+        await state.clear()
+        await message.answer("У вас уже есть активный запрос на обмен.")
+        return
+
+    swap_requests[target_id] = (requester_id, requester_number, target_number)
+    swap_requesters[requester_id] = target_id
+    await state.clear()
+
+    requester_name = usernames.get(requester_id, f"id:{requester_id}")
+    await message.bot.send_message(
+        target_id,
+        f"Пользователь {requester_name} предлагает поменяться местами: "
+        f"№{target_number} ↔ №{requester_number}.\n"
+        "Согласиться на обмен?",
+        reply_markup=get_swap_confirmation_keyboard(),
+    )
+    await message.answer(
+        f"Запрос отправлен владельцу места №{target_number}.",
+        reply_markup=get_main_keyboard(message),
+    )
+
+
+@dp.message(F.text.in_({CONFIRM_BUTTON, CANCEL_BUTTON}))
+async def process_user_swap_response(message: Message):
+    if message.from_user is None:
+        return
+
+    target_id = message.from_user.id
+    request = swap_requests.get(target_id)
+    if request is None:
+        await message.answer("Этот запрос на обмен уже неактуален.")
+        return
+
+    requester_id, requester_number, target_number = request
+    clear_swap_request(requester_id, target_id)
+
+    if message.text == CANCEL_BUTTON:
+        await message.answer(
+            "Вы отказались от обмена.",
+            reply_markup=get_main_keyboard(message),
+        )
+        await message.bot.send_message(
+            requester_id,
+            f"Владелец места №{target_number} отказался от обмена.",
+        )
+        return
+
+    if (
+        requester_id not in talon_numbers
+        or target_id not in talon_numbers
+        or talon_numbers[requester_id] != requester_number
+        or talon_numbers[target_id] != target_number
+    ):
+        await message.answer(
+            "Обмен невозможен: одно из мест уже изменилось.",
+            reply_markup=get_main_keyboard(message),
+        )
+        await message.bot.send_message(
+            requester_id,
+            "Обмен не выполнен: одно из мест уже изменилось.",
+        )
+        return
+
+    talon_numbers[requester_id], talon_numbers[target_id] = (
+        target_number,
+        requester_number,
+    )
+    await message.answer(
+        f"Обмен выполнен. Теперь ваше место №{requester_number}.",
+        reply_markup=get_main_keyboard(message),
+    )
+    await message.bot.send_message(
+        requester_id,
+        f"Обмен подтверждён. Теперь ваше место №{target_number}.",
     )
 
 

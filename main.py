@@ -57,8 +57,8 @@ SCHEDULE_DATE_BUTTON = "📅 По дате и времени"
 SCHEDULE_OPEN_BUTTON = "🟢 Открыть очередь"
 SCHEDULE_CLOSE_BUTTON = "🔴 Закрыть очередь"
 SCHEDULE_BACK_BUTTON = "↩️ Назад к редактору"
-CONFIRM_DISMISS_BUTTON = "✅ Да, выйти"
-CANCEL_DISMISS_BUTTON = "↩️ Нет, остаться"
+CONFIRM_BUTTON = "✅ Да"
+CANCEL_BUTTON = "❌ Нет"
 CHANGE_TALONNUM_BUTTON = "✏️ Изменить номер"
 SWITCH_PLACES_BUTTON = "🔁 Поменять местами"
 REMOVE_FROM_QUEUE_BUTTON = "🗑 Удалить из очереди"
@@ -289,6 +289,9 @@ def get_main_keyboard(
             KeyboardButton(text=RELEASE_PLACE_BUTTON),
         ],
         [
+            KeyboardButton(text=SWITCH_PLACES_USER_BUTTON),
+        ],
+        [
             KeyboardButton(text=SHOW_QUEUE_BUTTON),
             KeyboardButton(text=CHANGE_GROUP_BUTTON),
         ],
@@ -313,8 +316,39 @@ def get_dismiss_confirmation_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text=CONFIRM_DISMISS_BUTTON),
-                KeyboardButton(text=CANCEL_DISMISS_BUTTON),
+                KeyboardButton(text=CONFIRM_BUTTON),
+                KeyboardButton(text=CANCEL_BUTTON),
+            ],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def get_swap_targets_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    buttons = [
+        KeyboardButton(text=str(talon_numbers[target_user_id]))
+        for target_user_id in sorted(
+            queue,
+            key=lambda participant_id: talon_numbers[participant_id],
+        )
+        if target_user_id != user_id
+    ]
+    rows = [[button] for button in buttons]
+    rows.append([KeyboardButton(text=BACK_USER_BUTTON)])
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def get_swap_confirmation_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text=CONFIRM_BUTTON),
+                KeyboardButton(text=CANCEL_BUTTON),
             ],
         ],
         resize_keyboard=True,
@@ -367,6 +401,11 @@ def get_display_name(message: Message) -> str | None:
     if user.full_name:
         return user.full_name
     return str(user.id)
+
+
+def clear_swap_request(requester_id: int, target_id: int) -> None:
+    swap_requests.pop(target_id, None)
+    swap_requesters.pop(requester_id, None)
 
 
 async def add_talon(message: Message, number: int):
@@ -435,7 +474,7 @@ async def process_talon_number(message: Message, state: FSMContext):
         await message.answer("Введите номер талона числом.")
         return
 
-    if text == "❌ Освободить место":
+    if text == RELEASE_PLACE_BUTTON:
         await request_dismiss_talon(message, state)
         return
 
@@ -957,7 +996,7 @@ async def start_handler(message: Message):
     )
 
 
-@dp.message(F.text == "🎟 Взять талон")
+@dp.message(F.text == TAKE_TALON_BUTTON)
 async def take_talon_button(message: Message, state: FSMContext):
     if await require_group(message) is None:
         return
@@ -969,17 +1008,165 @@ async def take_talon_button(message: Message, state: FSMContext):
     )
 
 
-@dp.message(F.text == "❌ Освободить место")
+@dp.message(F.text == SWITCH_PLACES_USER_BUTTON)
+async def start_user_swap(message: Message, state: FSMContext):
+    if message.from_user is None:
+        return
+
+    user_id = message.from_user.id
+    if user_id not in talon_numbers:
+        await message.answer(
+            "Сначала займите место в очереди.",
+            reply_markup=get_main_keyboard(message),
+        )
+        return
+
+    available_targets = [
+        participant_id for participant_id in queue if participant_id != user_id
+    ]
+    if not available_targets:
+        await message.answer("Сейчас не с кем меняться местами.")
+        return
+
+    await state.set_state(TalonStates.waiting_swap_target)
+    await message.answer(
+        f"{get_queue_text()}\n\nВыберите номер, с владельцем которого хотите поменяться.",
+        reply_markup=get_swap_targets_keyboard(user_id),
+    )
+
+
+@dp.message(TalonStates.waiting_swap_target, F.text == BACK_USER_BUTTON)
+async def cancel_user_swap(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Обмен отменён.",
+        reply_markup=get_main_keyboard(message),
+    )
+
+
+@dp.message(TalonStates.waiting_swap_target, F.text)
+async def process_user_swap_target(message: Message, state: FSMContext):
+    if message.from_user is None or message.text is None:
+        return
+
+    requester_id = message.from_user.id
+    try:
+        target_number = int(message.text.strip())
+    except ValueError:
+        await message.answer("Выберите номер кнопкой ниже.")
+        return
+
+    requester_number = talon_numbers.get(requester_id)
+    target_id = find_user_by_talon(target_number)
+    if requester_number is None:
+        await state.clear()
+        await message.answer(
+            "У вас больше нет места в очереди.",
+            reply_markup=get_main_keyboard(message),
+        )
+        return
+    if target_id is None or target_id == requester_id:
+        await message.answer(
+            "Это место уже недоступно. Выберите другой номер.",
+            reply_markup=get_swap_targets_keyboard(requester_id),
+        )
+        return
+    if target_id in swap_requests:
+        await message.answer(
+            "Владелец этого места уже рассматривает другой запрос. "
+            "Выберите другой номер.",
+            reply_markup=get_swap_targets_keyboard(requester_id),
+        )
+        return
+    if requester_id in swap_requesters:
+        await state.clear()
+        await message.answer("У вас уже есть активный запрос на обмен.")
+        return
+
+    swap_requests[target_id] = (requester_id, requester_number, target_number)
+    swap_requesters[requester_id] = target_id
+    await state.clear()
+
+    requester_name = usernames.get(requester_id, f"id:{requester_id}")
+    await message.bot.send_message(
+        target_id,
+        f"Пользователь {requester_name} предлагает поменяться местами: "
+        f"№{target_number} ↔ №{requester_number}.\n"
+        "Согласиться на обмен?",
+        reply_markup=get_swap_confirmation_keyboard(),
+    )
+    await message.answer(
+        f"Запрос отправлен владельцу места №{target_number}.",
+        reply_markup=get_main_keyboard(message),
+    )
+
+
+@dp.message(F.text.in_({CONFIRM_BUTTON, CANCEL_BUTTON}))
+async def process_user_swap_response(message: Message):
+    if message.from_user is None:
+        return
+
+    target_id = message.from_user.id
+    request = swap_requests.get(target_id)
+    if request is None:
+        await message.answer("Этот запрос на обмен уже неактуален.")
+        return
+
+    requester_id, requester_number, target_number = request
+    clear_swap_request(requester_id, target_id)
+
+    if message.text == CANCEL_BUTTON:
+        await message.answer(
+            "Вы отказались от обмена.",
+            reply_markup=get_main_keyboard(message),
+        )
+        await message.bot.send_message(
+            requester_id,
+            f"Владелец места №{target_number} отказался от обмена.",
+        )
+        return
+
+    if (
+        requester_id not in talon_numbers
+        or target_id not in talon_numbers
+        or talon_numbers[requester_id] != requester_number
+        or talon_numbers[target_id] != target_number
+    ):
+        await message.answer(
+            "Обмен невозможен: одно из мест уже изменилось.",
+            reply_markup=get_main_keyboard(message),
+        )
+        await message.bot.send_message(
+            requester_id,
+            "Обмен не выполнен: одно из мест уже изменилось.",
+        )
+        return
+
+    talon_numbers[requester_id], talon_numbers[target_id] = (
+        target_number,
+        requester_number,
+    )
+    await message.answer(
+        f"Обмен выполнен. Теперь ваше место №{requester_number}.",
+        reply_markup=get_main_keyboard(message),
+    )
+    await message.bot.send_message(
+        requester_id,
+        f"Обмен подтверждён. Теперь ваше место №{target_number}.",
+    )
+
+
+@dp.message(F.text == RELEASE_PLACE_BUTTON)
 async def dismiss_talon_button(message: Message, state: FSMContext):
     await request_dismiss_talon(message, state)
 
 
-@dp.message(TalonStates.waiting_dismiss_confirmation, F.text == CONFIRM_DISMISS_BUTTON)
+@dp.message(TalonStates.waiting_dismiss_confirmation, F.text == CONFIRM_BUTTON)
 async def confirm_dismiss_talon(message: Message, state: FSMContext):
     await remove_talon(message, state)
 
 
-@dp.message(TalonStates.waiting_dismiss_confirmation, F.text == CANCEL_DISMISS_BUTTON)
+@dp.message(TalonStates.waiting_dismiss_confirmation, F.text == CANCEL_BUTTON)
 async def cancel_dismiss_talon(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
@@ -988,12 +1175,12 @@ async def cancel_dismiss_talon(message: Message, state: FSMContext):
     )
 
 
-@dp.message(F.text == "📋 Показать очередь")
+@dp.message(F.text == SHOW_QUEUE_BUTTON)
 async def queue_button(message: Message):
     await show_queue(message)
 
 
-@dp.message(F.text == "🛠 Редактор очереди")
+@dp.message(F.text == QUEUE_REDACTOR_BUTTON)
 async def queue_editor_button(message: Message, state: FSMContext):
     if not is_admin(message):
         return
@@ -1008,7 +1195,7 @@ async def queue_editor_button(message: Message, state: FSMContext):
     )
 
 
-@dp.message(F.text == "🔄 Обновить очередь")
+@dp.message(F.text == UPDATE_QUEUE_BUTTON)
 async def refresh_editor_queue(message: Message):
     if is_admin(message):
         group_id = await require_group(message)
@@ -1035,7 +1222,7 @@ async def clear_queue_button(message: Message):
     await clear_queue_command(message)
 
 
-@dp.message(F.text == "✏️ Изменить номер")
+@dp.message(F.text == CHANGE_TALONNUM_BUTTON)
 async def start_change_talon(message: Message, state: FSMContext):
     if not is_admin(message):
         return
@@ -1106,7 +1293,7 @@ async def process_new_talon_number(message: Message, state: FSMContext):
     )
 
 
-@dp.message(F.text == "🗑 Удалить из очереди")
+@dp.message(F.text == REMOVE_FROM_QUEUE_BUTTON)
 async def start_delete_talon(message: Message, state: FSMContext):
     if not is_admin(message):
         return
@@ -1149,7 +1336,7 @@ async def process_delete_talon(message: Message, state: FSMContext):
     )
 
 
-@dp.message(F.text == "↩️ Назад")
+@dp.message(F.text == BACK_USER_BUTTON)
 async def back_from_editor(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
@@ -1157,7 +1344,7 @@ async def back_from_editor(message: Message, state: FSMContext):
         reply_markup=get_main_keyboard(message),
     )
 
-@dp.message(F.text == "🔁 Поменять местами")
+@dp.message(F.text == SWITCH_PLACES_BUTTON)
 async def start_swap_talons(message: Message, state: FSMContext):
     if not is_admin(message):
         return

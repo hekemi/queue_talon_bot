@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
@@ -28,29 +29,82 @@ class EditorStates(StatesGroup):
     waiting_delete_talon = State()
     waiting_swap_first = State()
     waiting_swap_second = State()
+    waiting_schedule_type = State()
+    waiting_schedule_action = State()
+    waiting_schedule_timer = State()
+    waiting_schedule_date = State()
 
 
 OPEN_QUEUE_BUTTON = "🟢 Открыть очередь"
 CLOSE_QUEUE_BUTTON = "🔴 Закрыть очередь"
 CLEAR_QUEUE_BUTTON = "🧹 Очистить очередь"
+SCHEDULE_QUEUE_BUTTON = "⏰ Планировщик"
+CANCEL_SCHEDULE_BUTTON = "❌ Отменить расписание"
+SCHEDULE_TIMER_BUTTON = "⏱ Таймер"
+SCHEDULE_DATE_BUTTON = "📅 По дате и времени"
+SCHEDULE_OPEN_BUTTON = "🟢 Открыть очередь"
+SCHEDULE_CLOSE_BUTTON = "🔴 Закрыть очередь"
+SCHEDULE_BACK_BUTTON = "↩️ Назад к редактору"
 CONFIRM_DISMISS_BUTTON = "✅ Да, выйти"
 CANCEL_DISMISS_BUTTON = "↩️ Нет, остаться"
+CHANGE_TALONNUM_BUTTON = "✏️ Изменить номер"
+SWITCH_PLACES_BUTTON = "🔁 Поменять местами"
+REMOVE_FROM_QUEUE_BUTTON = "🗑 Удалить из очереди"
+UPDATE_QUEUE_BUTTON = "🔄 Обновить очередь"
+QUEUE_REDACTOR_BUTTON = "🛠 Редактор очереди"
+TAKE_TALON_BUTTON = "🎟 Взять талон"
+RELEASE_PLACE_BUTTON = "❌ Освободить место"
+SHOW_QUEUE_BUTTON = "📋 Показать очередь"
+
 
 
 def get_editor_keyboard() -> ReplyKeyboardMarkup:
     queue_control_button = (
         CLOSE_QUEUE_BUTTON if queue_is_open else OPEN_QUEUE_BUTTON
     )
-
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=queue_control_button)],
-            [KeyboardButton(text="✏️ Изменить номер")],
-            [KeyboardButton(text="🔁 Поменять местами")],
-            [KeyboardButton(text="🗑 Удалить из очереди")],
-            [KeyboardButton(text=CLEAR_QUEUE_BUTTON)],
-            [KeyboardButton(text="🔄 Обновить очередь")],
+            [
+                KeyboardButton(text=queue_control_button),
+                KeyboardButton(text=UPDATE_QUEUE_BUTTON),
+            ],
+            [
+                KeyboardButton(text=CHANGE_TALONNUM_BUTTON),
+                KeyboardButton(text=SWITCH_PLACES_BUTTON),
+            ],
+            [
+                KeyboardButton(text=REMOVE_FROM_QUEUE_BUTTON),
+                KeyboardButton(text=CLEAR_QUEUE_BUTTON),
+            ],
+            [
+                KeyboardButton(text=SCHEDULE_QUEUE_BUTTON),
+                KeyboardButton(text=CANCEL_SCHEDULE_BUTTON),
+            ],
             [KeyboardButton(text="↩️ Назад")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def get_schedule_type_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=SCHEDULE_TIMER_BUTTON)],
+            [KeyboardButton(text=SCHEDULE_DATE_BUTTON)],
+            [KeyboardButton(text=SCHEDULE_BACK_BUTTON)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def get_schedule_action_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=SCHEDULE_OPEN_BUTTON)],
+            [KeyboardButton(text=SCHEDULE_CLOSE_BUTTON)],
+            [KeyboardButton(text=SCHEDULE_BACK_BUTTON)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -73,16 +127,16 @@ def is_admin(message: Message) -> bool:
 def get_main_keyboard(message: Message) -> ReplyKeyboardMarkup:
     keyboard = [
         [
-            KeyboardButton(text="🎟 Взять талон"),
-            KeyboardButton(text="❌ Освободить место"),
+            KeyboardButton(text=TAKE_TALON_BUTTON),
+            KeyboardButton(text=RELEASE_PLACE_BUTTON),
         ],
         [
-            KeyboardButton(text="📋 Показать очередь"),
+            KeyboardButton(text=SHOW_QUEUE_BUTTON),
         ],
     ]
 
     if is_admin(message):
-        keyboard.append([KeyboardButton(text="🛠 Редактор очереди")])
+        keyboard.append([KeyboardButton(text=QUEUE_REDACTOR_BUTTON)])
 
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
@@ -108,6 +162,8 @@ queue = []  # список user_id в очереди
 talon_numbers = {}  # user_id -> номер талона
 usernames = {}  # user_id -> username / имя
 queue_is_open = True
+queue_schedule_tasks: dict[str, asyncio.Task] = {}
+queue_schedule_labels: dict[str, str] = {}
 
 
 def get_display_name(message: Message) -> str | None:
@@ -237,7 +293,7 @@ async def remove_talon(message: Message, state: FSMContext):
     number = talon_numbers.pop(user_id)
     queue.remove(user_id)
 
-    normalize_queue_numbers()
+    normalize_after_delete(number)
 
     await state.clear()
     await message.answer(
@@ -257,12 +313,237 @@ async def set_queue_status(message: Message, is_open: bool):
     if not is_admin(message):
         return
 
-    queue_is_open = is_open
+    apply_queue_status(is_open)
     status = "открыта" if is_open else "закрыта"
     await message.answer(
         f"Очередь {status} для новых участников.",
         reply_markup=get_editor_keyboard(),
     )
+
+
+def apply_queue_status(is_open: bool) -> None:
+    global queue_is_open
+    queue_is_open = is_open
+
+
+def cancel_queue_schedule(action: str) -> bool:
+    task = queue_schedule_tasks.pop(action, None)
+    queue_schedule_labels.pop(action, None)
+    if task is None:
+        return False
+    task.cancel()
+    return True
+
+
+def schedule_queue_action(action: str, delay: float, label: str) -> None:
+    cancel_queue_schedule(action)
+
+    async def run_scheduled_action() -> None:
+        try:
+            await asyncio.sleep(delay)
+            apply_queue_status(action == "open")
+            queue_schedule_tasks.pop(action, None)
+            queue_schedule_labels.pop(action, None)
+            logging.info("Очередь автоматически %s.", "открыта" if action == "open" else "закрыта")
+        except asyncio.CancelledError:
+            raise
+
+    queue_schedule_labels[action] = label
+    queue_schedule_tasks[action] = asyncio.create_task(run_scheduled_action())
+
+
+def parse_schedule_request(text: str) -> tuple[str, float, str] | None:
+    parts = text.strip().split(maxsplit=3)
+    if len(parts) < 3:
+        return None
+
+    schedule_type, action = parts[0].lower(), parts[1].lower()
+    action_aliases = {"открыть": "open", "закрыть": "close", "open": "open", "close": "close"}
+    action = action_aliases.get(action, "")
+    if schedule_type in {"таймер", "timer"}:
+        if action not in {"open", "close"}:
+            return None
+        try:
+            minutes = float(parts[2].replace(",", "."))
+        except ValueError:
+            return None
+        if minutes <= 0:
+            return None
+        return action, minutes * 60, f"через {minutes:g} мин."
+
+    if schedule_type not in {"дата", "date"} or action not in {"open", "close"} or len(parts) < 4:
+        return None
+
+    try:
+        scheduled_at = datetime.strptime(
+            f"{parts[2]} {parts[3]}",
+            "%d.%m.%Y %H:%M",
+        ).astimezone()
+    except ValueError:
+        try:
+            scheduled_at = datetime.strptime(
+                f"{parts[2]} {parts[3]}",
+                "%Y-%m-%d %H:%M",
+            ).astimezone()
+        except ValueError:
+            return None
+
+    delay = (scheduled_at - datetime.now().astimezone()).total_seconds()
+    if delay <= 0:
+        return None
+    return action, delay, scheduled_at.strftime("%d.%m.%Y %H:%M %Z")
+
+
+async def finish_schedule(
+    message: Message,
+    state: FSMContext,
+    action: str,
+    delay: float,
+    label: str,
+) -> None:
+    schedule_queue_action(action, delay, label)
+    status = "открытие" if action == "open" else "закрытие"
+    await state.clear()
+    await message.answer(
+        f"Запланировано {status} очереди {label}.",
+        reply_markup=get_editor_keyboard(),
+    )
+
+
+def get_queue_schedule_text() -> str:
+    if not queue_schedule_labels:
+        return "Активных расписаний нет."
+    lines = [
+        f"{'Открытие' if action == 'open' else 'Закрытие'}: {label}"
+        for action, label in queue_schedule_labels.items()
+    ]
+    return "Активные расписания:\n" + "\n".join(lines)
+
+
+@dp.message(Command("schedule_queue"))
+async def schedule_queue_command(
+    message: Message,
+    command: CommandObject,
+    state: FSMContext,
+):
+    if not command.args:
+        await message.answer(
+            "Используйте:\n"
+            "/schedule_queue timer open 30\n"
+            "/schedule_queue timer close 15\n"
+            "/schedule_queue date open 03.11.2026 19:00\n"
+            "/schedule_queue date close 03.11.2026 20:00"
+        )
+        return
+    if not is_admin(message):
+        return
+    parsed = parse_schedule_request(command.args)
+    if parsed is None:
+        await message.answer("Не удалось распознать расписание. Проверьте формат команды.")
+        return
+    action, delay, label = parsed
+    await finish_schedule(message, state, action, delay, label)
+
+
+@dp.message(Command("cancel_schedule"))
+async def cancel_schedule_command(message: Message):
+    if not is_admin(message):
+        return
+    cancelled = sum(
+        cancel_queue_schedule(action) for action in ("open", "close")
+    )
+    text = "Расписания отменены." if cancelled else "Активных расписаний нет."
+    await message.answer(text, reply_markup=get_editor_keyboard())
+
+
+@dp.message(F.text == SCHEDULE_QUEUE_BUTTON)
+async def schedule_queue_button(message: Message, state: FSMContext):
+    if not is_admin(message):
+        return
+    await state.set_state(EditorStates.waiting_schedule_type)
+    await message.answer(
+        "Как запланировать изменение очереди?",
+        reply_markup=get_schedule_type_keyboard(),
+    )
+
+
+@dp.message(EditorStates.waiting_schedule_type, F.text == SCHEDULE_TIMER_BUTTON)
+async def choose_schedule_timer(message: Message, state: FSMContext):
+    await state.update_data(schedule_type="timer")
+    await state.set_state(EditorStates.waiting_schedule_action)
+    await message.answer("Что сделать по таймеру?", reply_markup=get_schedule_action_keyboard())
+
+
+@dp.message(EditorStates.waiting_schedule_type, F.text == SCHEDULE_DATE_BUTTON)
+async def choose_schedule_date(message: Message, state: FSMContext):
+    await state.update_data(schedule_type="date")
+    await state.set_state(EditorStates.waiting_schedule_action)
+    await message.answer("Что сделать по дате?", reply_markup=get_schedule_action_keyboard())
+
+
+@dp.message(EditorStates.waiting_schedule_action, F.text.in_({SCHEDULE_OPEN_BUTTON, SCHEDULE_CLOSE_BUTTON}))
+async def choose_schedule_action(message: Message, state: FSMContext):
+    action = "open" if message.text == SCHEDULE_OPEN_BUTTON else "close"
+    data = await state.get_data()
+    await state.update_data(action=action)
+    if data.get("schedule_type") == "timer":
+        await state.set_state(EditorStates.waiting_schedule_timer)
+        await message.answer("Через сколько минут изменить очередь? Введите положительное число.")
+    else:
+        await state.set_state(EditorStates.waiting_schedule_date)
+        await message.answer(
+            "Введите дату и время в формате ДД.ММ.ГГГГ ЧЧ:ММ\n"
+            "Например: 03.11.2026 19:00"
+        )
+
+
+@dp.message(EditorStates.waiting_schedule_timer, F.text)
+async def process_schedule_timer(message: Message, state: FSMContext):
+    if message.text is None:
+        return
+    try:
+        minutes = float(message.text.strip().replace(",", "."))
+    except ValueError:
+        await message.answer("Введите количество минут числом.")
+        return
+    if minutes <= 0:
+        await message.answer("Количество минут должно быть больше нуля.")
+        return
+    data = await state.get_data()
+    await finish_schedule(
+        message,
+        state,
+        data["action"],
+        minutes * 60,
+        f"через {minutes:g} мин.",
+    )
+
+
+@dp.message(EditorStates.waiting_schedule_date, F.text)
+async def process_schedule_date(message: Message, state: FSMContext):
+    if message.text is None:
+        return
+    data = await state.get_data()
+    parsed = parse_schedule_request(f"дата {data['action']} {message.text}")
+    if parsed is None:
+        await message.answer(
+            "Не удалось распознать дату. Используйте формат ДД.ММ.ГГГГ ЧЧ:ММ "
+            "и укажите дату в будущем."
+        )
+        return
+    action, delay, label = parsed
+    await finish_schedule(message, state, action, delay, label)
+
+
+@dp.message(F.text == SCHEDULE_BACK_BUTTON)
+async def back_from_scheduler(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Редактор очереди.", reply_markup=get_editor_keyboard())
+
+
+@dp.message(F.text == CANCEL_SCHEDULE_BUTTON)
+async def cancel_schedule_button(message: Message):
+    await cancel_schedule_command(message)
 
 
 @dp.message(Command("open_queue"))
@@ -471,7 +752,7 @@ async def process_delete_talon(message: Message, state: FSMContext):
     usernames.pop(user_id, None)
     queue.remove(user_id)
 
-    normalize_queue_numbers()
+    normalize_after_delete(number)
 
     await state.clear()
     await message.answer(
@@ -564,15 +845,26 @@ def get_queue_text() -> str:
 
     return "Текущая очередь:\n" + "\n".join(lines)
 
-def normalize_queue_numbers() -> None:
-    """Перенумеровывает очередь с первого номера без пропусков."""
-    ordered_users = sorted(
-        queue,
-        key=lambda user_id: talon_numbers.get(user_id, 0),
+def normalize_after_delete(deleted_number: int) -> None:
+    """Убирает только блок пустот перед ближайшим следующим занятым номером.
+
+    Примеры:
+    - 1,2,4 после удаления 1 -> 1,3
+    - 1,3,4 после удаления 1 -> 1,2
+    """
+    next_occupied = min(
+        (number for number in talon_numbers.values() if number > deleted_number),
+        default=None,
     )
 
-    for number, user_id in enumerate(ordered_users, start=1):
-        talon_numbers[user_id] = number
+    if next_occupied is None:
+        return
+
+    shift = next_occupied - deleted_number
+
+    for user_id, number in list(talon_numbers.items()):
+        if number >= next_occupied:
+            talon_numbers[user_id] = number - shift
 
 def find_user_by_talon(number: int) -> int | None:
     for user_id in queue:

@@ -45,8 +45,8 @@ SCHEDULE_DATE_BUTTON = "📅 По дате и времени"
 SCHEDULE_OPEN_BUTTON = "🟢 Открыть очередь"
 SCHEDULE_CLOSE_BUTTON = "🔴 Закрыть очередь"
 SCHEDULE_BACK_BUTTON = "↩️ Назад к редактору"
-CONFIRM_DISMISS_BUTTON = "✅ Да, выйти"
-CANCEL_DISMISS_BUTTON = "↩️ Нет, остаться"
+CONFIRM_BUTTON = "✅ Да"
+CANCEL_BUTTON = "❌ Нет"
 CHANGE_TALONNUM_BUTTON = "✏️ Изменить номер"
 SWITCH_PLACES_BUTTON = "🔁 Поменять местами"
 REMOVE_FROM_QUEUE_BUTTON = "🗑 Удалить из очереди"
@@ -55,7 +55,8 @@ QUEUE_REDACTOR_BUTTON = "🛠 Редактор очереди"
 TAKE_TALON_BUTTON = "🎟 Взять талон"
 RELEASE_PLACE_BUTTON = "❌ Освободить место"
 SHOW_QUEUE_BUTTON = "📋 Показать очередь"
-
+SWITCH_PLACES_USER_BUTTON = "🔁 Поменяться местами"
+BACK_USER_BUTTON = "↩️ Назад"
 
 
 def get_editor_keyboard() -> ReplyKeyboardMarkup:
@@ -131,6 +132,9 @@ def get_main_keyboard(message: Message) -> ReplyKeyboardMarkup:
             KeyboardButton(text=RELEASE_PLACE_BUTTON),
         ],
         [
+            KeyboardButton(text=SWITCH_PLACES_USER_BUTTON),
+        ],
+        [
             KeyboardButton(text=SHOW_QUEUE_BUTTON),
         ],
     ]
@@ -149,8 +153,8 @@ def get_dismiss_confirmation_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text=CONFIRM_DISMISS_BUTTON),
-                KeyboardButton(text=CANCEL_DISMISS_BUTTON),
+                KeyboardButton(text=CONFIRM_BUTTON),
+                KeyboardButton(text=CANCEL_BUTTON),
             ],
         ],
         resize_keyboard=True,
@@ -240,7 +244,7 @@ async def process_talon_number(message: Message, state: FSMContext):
         await message.answer("Введите номер талона числом.")
         return
 
-    if text == "❌ Освободить место":
+    if text == RELEASE_PLACE_BUTTON:
         await request_dismiss_talon(message, state)
         return
 
@@ -588,7 +592,7 @@ async def start_handler(message: Message):
     )
 
 
-@dp.message(F.text == "🎟 Взять талон")
+@dp.message(F.text == TAKE_TALON_BUTTON)
 async def take_talon_button(message: Message, state: FSMContext):
     await show_queue(message)
     await state.set_state(TalonStates.waiting_number)
@@ -598,17 +602,17 @@ async def take_talon_button(message: Message, state: FSMContext):
     )
 
 
-@dp.message(F.text == "❌ Освободить место")
+@dp.message(F.text == RELEASE_PLACE_BUTTON)
 async def dismiss_talon_button(message: Message, state: FSMContext):
     await request_dismiss_talon(message, state)
 
 
-@dp.message(TalonStates.waiting_dismiss_confirmation, F.text == CONFIRM_DISMISS_BUTTON)
+@dp.message(TalonStates.waiting_dismiss_confirmation, F.text == CONFIRM_BUTTON)
 async def confirm_dismiss_talon(message: Message, state: FSMContext):
     await remove_talon(message, state)
 
 
-@dp.message(TalonStates.waiting_dismiss_confirmation, F.text == CANCEL_DISMISS_BUTTON)
+@dp.message(TalonStates.waiting_dismiss_confirmation, F.text == CANCEL_BUTTON)
 async def cancel_dismiss_talon(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
@@ -617,12 +621,12 @@ async def cancel_dismiss_talon(message: Message, state: FSMContext):
     )
 
 
-@dp.message(F.text == "📋 Показать очередь")
+@dp.message(F.text == SHOW_QUEUE_BUTTON)
 async def queue_button(message: Message):
     await show_queue(message)
 
 
-@dp.message(F.text == "🛠 Редактор очереди")
+@dp.message(F.text == QUEUE_REDACTOR_BUTTON)
 async def queue_editor_button(message: Message, state: FSMContext):
     if not is_admin(message):
         return
@@ -634,7 +638,7 @@ async def queue_editor_button(message: Message, state: FSMContext):
     )
 
 
-@dp.message(F.text == "🔄 Обновить очередь")
+@dp.message(F.text == UPDATE_QUEUE_BUTTON)
 async def refresh_editor_queue(message: Message):
     if is_admin(message):
         await message.answer(
@@ -658,7 +662,7 @@ async def clear_queue_button(message: Message):
     await clear_queue_command(message)
 
 
-@dp.message(F.text == "✏️ Изменить номер")
+@dp.message(F.text == CHANGE_TALONNUM_BUTTON)
 async def start_change_talon(message: Message, state: FSMContext):
     if not is_admin(message):
         return
@@ -722,7 +726,7 @@ async def process_new_talon_number(message: Message, state: FSMContext):
     )
 
 
-@dp.message(F.text == "🗑 Удалить из очереди")
+@dp.message(F.text == REMOVE_FROM_QUEUE_BUTTON)
 async def start_delete_talon(message: Message, state: FSMContext):
     if not is_admin(message):
         return
@@ -761,7 +765,7 @@ async def process_delete_talon(message: Message, state: FSMContext):
     )
 
 
-@dp.message(F.text == "↩️ Назад")
+@dp.message(F.text == BACK_USER_BUTTON)
 async def back_from_editor(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
@@ -769,7 +773,7 @@ async def back_from_editor(message: Message, state: FSMContext):
         reply_markup=get_main_keyboard(message),
     )
 
-@dp.message(F.text == "🔁 Поменять местами")
+@dp.message(F.text == SWITCH_PLACES_BUTTON)
 async def start_swap_talons(message: Message, state: FSMContext):
     if not is_admin(message):
         return

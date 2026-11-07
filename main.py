@@ -32,6 +32,7 @@ class TalonStates(StatesGroup):
     waiting_number = State()
     waiting_dismiss_confirmation = State()
     waiting_group_name = State()
+    waiting_swap_target = State()
 
 
 class EditorStates(StatesGroup):
@@ -72,6 +73,8 @@ GROUPS_BUTTON = "👥 Управление группами"
 ADD_GROUP_BUTTON = "➕ Добавить группу"
 DELETE_GROUP_BUTTON = "🗑 Удалить группу"
 BACK_TO_GROUPS_BUTTON = "↩️ К группам"
+SWITCH_PLACES_USER_BUTTON = "🔁 Поменяться местами"
+BACK_USER_BUTTON = "↩️ Назад"
 
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "data/queue.db"))
 
@@ -160,6 +163,13 @@ def release_user_from_group_queue(user_id: int, group_id: int) -> None:
     group.usernames.pop(user_id, None)
     normalize_after_delete(group, number)
 
+    target_id = swap_requesters.pop(user_id, None)
+    if target_id is not None:
+        swap_requests.pop(target_id, None)
+    request = swap_requests.pop(user_id, None)
+    if request is not None:
+        swap_requesters.pop(request.requester_id, None)
+
 
 def switch_user_group(user_id: int, username: str, group_id: int) -> None:
     current_group_id = get_user_group_id(user_id)
@@ -185,6 +195,7 @@ def create_group(name: str) -> int | None:
 def delete_group(group_id: int) -> bool:
     with get_db() as connection:
         cursor = connection.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+    clear_group_swap_requests(group_id)
     group_queues.pop(group_id, None)
     return cursor.rowcount > 0
 
@@ -226,7 +237,7 @@ def get_editor_keyboard(message: Message) -> ReplyKeyboardMarkup:
                 KeyboardButton(text=SCHEDULE_QUEUE_BUTTON),
                 KeyboardButton(text=CANCEL_SCHEDULE_BUTTON),
             ],
-            [KeyboardButton(text="↩️ Назад")],
+            [KeyboardButton(text=BACK_USER_BUTTON)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -325,12 +336,13 @@ def get_dismiss_confirmation_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def get_swap_targets_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+def get_swap_targets_keyboard(user_id: int, group_id: int) -> ReplyKeyboardMarkup:
+    group = get_group_queue(group_id)
     buttons = [
-        KeyboardButton(text=str(talon_numbers[target_user_id]))
+        KeyboardButton(text=str(group.talon_numbers[target_user_id]))
         for target_user_id in sorted(
-            queue,
-            key=lambda participant_id: talon_numbers[participant_id],
+            group.queue,
+            key=lambda participant_id: group.talon_numbers[participant_id],
         )
         if target_user_id != user_id
     ]
@@ -367,6 +379,19 @@ class GroupQueue:
 
 
 group_queues: dict[int, GroupQueue] = {}
+
+
+@dataclass(frozen=True)
+class SwapRequest:
+    group_id: int
+    requester_id: int
+    requester_number: int
+    target_id: int
+    target_number: int
+
+
+swap_requests: dict[int, SwapRequest] = {}
+swap_requesters: dict[int, int] = {}
 
 
 def get_group_queue(group_id: int) -> GroupQueue:
@@ -406,6 +431,12 @@ def get_display_name(message: Message) -> str | None:
 def clear_swap_request(requester_id: int, target_id: int) -> None:
     swap_requests.pop(target_id, None)
     swap_requesters.pop(requester_id, None)
+
+
+def clear_group_swap_requests(group_id: int) -> None:
+    for target_id, request in list(swap_requests.items()):
+        if request.group_id == group_id:
+            clear_swap_request(request.requester_id, target_id)
 
 
 async def add_talon(message: Message, number: int):
@@ -532,10 +563,8 @@ async def remove_talon(message: Message, state: FSMContext):
         )
         return
 
-    number = group.talon_numbers.pop(user_id)
-    group.queue.remove(user_id)
-
-    normalize_after_delete(group, number)
+    number = group.talon_numbers[user_id]
+    release_user_from_group_queue(user_id, group_id)
 
     await state.clear()
     await message.answer(
@@ -823,6 +852,7 @@ async def clear_queue_command(message: Message):
     group.queue.clear()
     group.talon_numbers.clear()
     group.usernames.clear()
+    clear_group_swap_requests(group_id)
 
     await message.answer(
         "Очередь успешно очищена.",
@@ -1014,7 +1044,11 @@ async def start_user_swap(message: Message, state: FSMContext):
         return
 
     user_id = message.from_user.id
-    if user_id not in talon_numbers:
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    group = get_group_queue(group_id)
+    if user_id not in group.talon_numbers:
         await message.answer(
             "Сначала займите место в очереди.",
             reply_markup=get_main_keyboard(message),
@@ -1022,7 +1056,7 @@ async def start_user_swap(message: Message, state: FSMContext):
         return
 
     available_targets = [
-        participant_id for participant_id in queue if participant_id != user_id
+        participant_id for participant_id in group.queue if participant_id != user_id
     ]
     if not available_targets:
         await message.answer("Сейчас не с кем меняться местами.")
@@ -1030,8 +1064,9 @@ async def start_user_swap(message: Message, state: FSMContext):
 
     await state.set_state(TalonStates.waiting_swap_target)
     await message.answer(
-        f"{get_queue_text()}\n\nВыберите номер, с владельцем которого хотите поменяться.",
-        reply_markup=get_swap_targets_keyboard(user_id),
+        f"{get_queue_text(group_id)}\n\n"
+        "Выберите номер, с владельцем которого хотите поменяться.",
+        reply_markup=get_swap_targets_keyboard(user_id, group_id),
     )
 
 
@@ -1048,16 +1083,25 @@ async def cancel_user_swap(message: Message, state: FSMContext):
 async def process_user_swap_target(message: Message, state: FSMContext):
     if message.from_user is None or message.text is None:
         return
+    bot = message.bot
+    if bot is None:
+        logging.error("Не удалось отправить запрос обмена: бот недоступен.")
+        return
 
     requester_id = message.from_user.id
+    group_id = await require_group(message)
+    if group_id is None:
+        await state.clear()
+        return
+    group = get_group_queue(group_id)
     try:
         target_number = int(message.text.strip())
     except ValueError:
         await message.answer("Выберите номер кнопкой ниже.")
         return
 
-    requester_number = talon_numbers.get(requester_id)
-    target_id = find_user_by_talon(target_number)
+    requester_number = group.talon_numbers.get(requester_id)
+    target_id = find_user_by_talon(group_id, target_number)
     if requester_number is None:
         await state.clear()
         await message.answer(
@@ -1068,14 +1112,14 @@ async def process_user_swap_target(message: Message, state: FSMContext):
     if target_id is None or target_id == requester_id:
         await message.answer(
             "Это место уже недоступно. Выберите другой номер.",
-            reply_markup=get_swap_targets_keyboard(requester_id),
+            reply_markup=get_swap_targets_keyboard(requester_id, group_id),
         )
         return
     if target_id in swap_requests:
         await message.answer(
             "Владелец этого места уже рассматривает другой запрос. "
             "Выберите другой номер.",
-            reply_markup=get_swap_targets_keyboard(requester_id),
+            reply_markup=get_swap_targets_keyboard(requester_id, group_id),
         )
         return
     if requester_id in swap_requesters:
@@ -1083,12 +1127,18 @@ async def process_user_swap_target(message: Message, state: FSMContext):
         await message.answer("У вас уже есть активный запрос на обмен.")
         return
 
-    swap_requests[target_id] = (requester_id, requester_number, target_number)
+    swap_requests[target_id] = SwapRequest(
+        group_id=group_id,
+        requester_id=requester_id,
+        requester_number=requester_number,
+        target_id=target_id,
+        target_number=target_number,
+    )
     swap_requesters[requester_id] = target_id
     await state.clear()
 
-    requester_name = usernames.get(requester_id, f"id:{requester_id}")
-    await message.bot.send_message(
+    requester_name = group.usernames.get(requester_id, f"id:{requester_id}")
+    await bot.send_message(
         target_id,
         f"Пользователь {requester_name} предлагает поменяться местами: "
         f"№{target_number} ↔ №{requester_number}.\n"
@@ -1105,6 +1155,10 @@ async def process_user_swap_target(message: Message, state: FSMContext):
 async def process_user_swap_response(message: Message):
     if message.from_user is None:
         return
+    bot = message.bot
+    if bot is None:
+        logging.error("Не удалось отправить ответ обмена: бот недоступен.")
+        return
 
     target_id = message.from_user.id
     request = swap_requests.get(target_id)
@@ -1112,7 +1166,10 @@ async def process_user_swap_response(message: Message):
         await message.answer("Этот запрос на обмен уже неактуален.")
         return
 
-    requester_id, requester_number, target_number = request
+    group = get_group_queue(request.group_id)
+    requester_id = request.requester_id
+    requester_number = request.requester_number
+    target_number = request.target_number
     clear_swap_request(requester_id, target_id)
 
     if message.text == CANCEL_BUTTON:
@@ -1120,29 +1177,29 @@ async def process_user_swap_response(message: Message):
             "Вы отказались от обмена.",
             reply_markup=get_main_keyboard(message),
         )
-        await message.bot.send_message(
+        await bot.send_message(
             requester_id,
             f"Владелец места №{target_number} отказался от обмена.",
         )
         return
 
     if (
-        requester_id not in talon_numbers
-        or target_id not in talon_numbers
-        or talon_numbers[requester_id] != requester_number
-        or talon_numbers[target_id] != target_number
+        get_user_group_id(requester_id) != request.group_id
+        or get_user_group_id(target_id) != request.group_id
+        or group.talon_numbers.get(requester_id) != requester_number
+        or group.talon_numbers.get(target_id) != target_number
     ):
         await message.answer(
             "Обмен невозможен: одно из мест уже изменилось.",
             reply_markup=get_main_keyboard(message),
         )
-        await message.bot.send_message(
+        await bot.send_message(
             requester_id,
             "Обмен не выполнен: одно из мест уже изменилось.",
         )
         return
 
-    talon_numbers[requester_id], talon_numbers[target_id] = (
+    group.talon_numbers[requester_id], group.talon_numbers[target_id] = (
         target_number,
         requester_number,
     )
@@ -1150,7 +1207,7 @@ async def process_user_swap_response(message: Message):
         f"Обмен выполнен. Теперь ваше место №{requester_number}.",
         reply_markup=get_main_keyboard(message),
     )
-    await message.bot.send_message(
+    await bot.send_message(
         requester_id,
         f"Обмен подтверждён. Теперь ваше место №{target_number}.",
     )
@@ -1323,11 +1380,7 @@ async def process_delete_talon(message: Message, state: FSMContext):
         await message.answer("Человек с таким номером не найден.")
         return
 
-    group.talon_numbers.pop(user_id, None)
-    group.usernames.pop(user_id, None)
-    group.queue.remove(user_id)
-
-    normalize_after_delete(group, number)
+    release_user_from_group_queue(user_id, group_id)
 
     await state.clear()
     await message.answer(

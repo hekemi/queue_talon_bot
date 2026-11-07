@@ -1,11 +1,21 @@
 import asyncio
 import logging
 import os
+import sqlite3
+from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 from aiogram.exceptions import TelegramUnauthorizedError, TelegramNetworkError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -21,6 +31,7 @@ dp = Dispatcher(storage=MemoryStorage())
 class TalonStates(StatesGroup):
     waiting_number = State()
     waiting_dismiss_confirmation = State()
+    waiting_group_name = State()
 
 
 class EditorStates(StatesGroup):
@@ -33,6 +44,7 @@ class EditorStates(StatesGroup):
     waiting_schedule_action = State()
     waiting_schedule_timer = State()
     waiting_schedule_date = State()
+    waiting_new_group_name = State()
 
 
 OPEN_QUEUE_BUTTON = "🟢 Открыть очередь"
@@ -55,13 +67,147 @@ QUEUE_REDACTOR_BUTTON = "🛠 Редактор очереди"
 TAKE_TALON_BUTTON = "🎟 Взять талон"
 RELEASE_PLACE_BUTTON = "❌ Освободить место"
 SHOW_QUEUE_BUTTON = "📋 Показать очередь"
+CHANGE_GROUP_BUTTON = "🔄 Сменить группу"
+GROUPS_BUTTON = "👥 Управление группами"
+ADD_GROUP_BUTTON = "➕ Добавить группу"
+DELETE_GROUP_BUTTON = "🗑 Удалить группу"
+BACK_TO_GROUPS_BUTTON = "↩️ К группам"
+
+DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "data/queue.db"))
 
 
+def get_db() -> sqlite3.Connection:
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
 
-def get_editor_keyboard() -> ReplyKeyboardMarkup:
-    queue_control_button = (
-        CLOSE_QUEUE_BUTTON if queue_is_open else OPEN_QUEUE_BUTTON
+
+def init_database() -> None:
+    with get_db() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS user_groups (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL,
+                group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE
+            );
+            """
+        )
+
+
+def get_groups() -> list[sqlite3.Row]:
+    with get_db() as connection:
+        return connection.execute(
+            "SELECT id, name FROM groups ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+
+
+def get_user_group_id(user_id: int) -> int | None:
+    with get_db() as connection:
+        row = connection.execute(
+            "SELECT group_id FROM user_groups WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    return int(row["group_id"]) if row else None
+
+
+def get_group_name(group_id: int) -> str:
+    with get_db() as connection:
+        row = connection.execute(
+            "SELECT name FROM groups WHERE id = ?", (group_id,)
+        ).fetchone()
+    return str(row["name"]) if row else "Неизвестная группа"
+
+
+def assign_user_id_to_group(user_id: int, username: str, group_id: int) -> None:
+    with get_db() as connection:
+        connection.execute(
+            """
+            INSERT INTO user_groups (user_id, username, group_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                group_id = excluded.group_id
+            """,
+            (user_id, username, group_id),
+        )
+
+
+def assign_user_to_group(message: Message, group_id: int) -> None:
+    if message.from_user is None:
+        return
+    user = message.from_user
+    assign_user_id_to_group(
+        user.id,
+        user.username or user.full_name or str(user.id),
+        group_id,
     )
+
+
+def release_user_from_group_queue(user_id: int, group_id: int) -> None:
+    group = group_queues.get(group_id)
+    if group is None or user_id not in group.queue:
+        return
+
+    number = group.talon_numbers.pop(user_id)
+    group.queue.remove(user_id)
+    group.usernames.pop(user_id, None)
+    normalize_after_delete(group, number)
+
+
+def switch_user_group(user_id: int, username: str, group_id: int) -> None:
+    current_group_id = get_user_group_id(user_id)
+    if current_group_id is not None:
+        release_user_from_group_queue(user_id, current_group_id)
+    assign_user_id_to_group(user_id, username, group_id)
+
+
+def create_group(name: str) -> int | None:
+    normalized_name = " ".join(name.split())
+    if not normalized_name:
+        return None
+    try:
+        with get_db() as connection:
+            cursor = connection.execute(
+                "INSERT INTO groups (name) VALUES (?)", (normalized_name,)
+            )
+            return int(cursor.lastrowid) if cursor.lastrowid is not None else None
+    except sqlite3.IntegrityError:
+        return None
+
+
+def delete_group(group_id: int) -> bool:
+    with get_db() as connection:
+        cursor = connection.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+    group_queues.pop(group_id, None)
+    return cursor.rowcount > 0
+
+
+def get_group_selection_keyboard(
+    include_new: bool = True,
+) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text=f"👥 {row['name']}", callback_data=f"group:{row['id']}")]
+        for row in get_groups()
+    ]
+    if include_new:
+        buttons.append(
+            [InlineKeyboardButton(text=ADD_GROUP_BUTTON, callback_data="group:new")]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+
+def get_editor_keyboard(message: Message) -> ReplyKeyboardMarkup:
+    group_id = get_message_group_id(message)
+    queue_state = get_group_queue(group_id) if group_id is not None else GroupQueue()
+    queue_control_button = CLOSE_QUEUE_BUTTON if queue_state.is_open else OPEN_QUEUE_BUTTON
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -124,7 +270,19 @@ def is_admin(message: Message) -> bool:
     return username is not None and username.lower() in ADMIN_USERNAMES
 
 
-def get_main_keyboard(message: Message) -> ReplyKeyboardMarkup:
+def is_admin_user(username: str | None) -> bool:
+    return username is not None and username.lower() in ADMIN_USERNAMES
+
+
+def get_main_keyboard(
+    message: Message | None = None,
+    admin: bool | None = None,
+) -> ReplyKeyboardMarkup:
+    is_user_admin = (
+        is_admin(message)
+        if admin is None and message is not None
+        else bool(admin)
+    )
     keyboard = [
         [
             KeyboardButton(text=TAKE_TALON_BUTTON),
@@ -132,11 +290,17 @@ def get_main_keyboard(message: Message) -> ReplyKeyboardMarkup:
         ],
         [
             KeyboardButton(text=SHOW_QUEUE_BUTTON),
+            KeyboardButton(text=CHANGE_GROUP_BUTTON),
         ],
     ]
 
-    if is_admin(message):
-        keyboard.append([KeyboardButton(text=QUEUE_REDACTOR_BUTTON)])
+    if is_user_admin:
+        keyboard.append(
+            [
+                KeyboardButton(text=QUEUE_REDACTOR_BUTTON),
+                KeyboardButton(text=GROUPS_BUTTON),
+            ]
+        )
 
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
@@ -158,12 +322,39 @@ def get_dismiss_confirmation_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-queue = []  # список user_id в очереди
-talon_numbers = {}  # user_id -> номер талона
-usernames = {}  # user_id -> username / имя
-queue_is_open = True
-queue_schedule_tasks: dict[str, asyncio.Task] = {}
-queue_schedule_labels: dict[str, str] = {}
+@dataclass
+class GroupQueue:
+    queue: list[int] = field(default_factory=list)
+    talon_numbers: dict[int, int] = field(default_factory=dict)
+    usernames: dict[int, str] = field(default_factory=dict)
+    is_open: bool = True
+    schedule_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
+    schedule_labels: dict[str, str] = field(default_factory=dict)
+
+
+group_queues: dict[int, GroupQueue] = {}
+
+
+def get_group_queue(group_id: int) -> GroupQueue:
+    return group_queues.setdefault(group_id, GroupQueue())
+
+
+def get_message_group_id(message: Message) -> int | None:
+    return (
+        get_user_group_id(message.from_user.id)
+        if message.from_user is not None
+        else None
+    )
+
+
+async def require_group(message: Message) -> int | None:
+    group_id = get_message_group_id(message)
+    if group_id is None:
+        await message.answer(
+            "Сначала выберите группу:",
+            reply_markup=get_group_selection_keyboard(),
+        )
+    return group_id
 
 
 def get_display_name(message: Message) -> str | None:
@@ -183,18 +374,22 @@ async def add_talon(message: Message, number: int):
         return
 
     user_id = message.from_user.id
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    group = get_group_queue(group_id)
 
-    if not queue_is_open and not is_admin(message):
+    if not group.is_open and not is_admin(message):
         await message.answer("Очередь закрыта для новых участников.")
         return
 
-    if user_id in talon_numbers:
+    if user_id in group.talon_numbers:
         await message.answer(
-            f"Вы уже в очереди. Ваш талон №{talon_numbers[user_id]}"
+            f"Вы уже в очереди. Ваш талон №{group.talon_numbers[user_id]}"
         )
         return
 
-    occupied_numbers = set(talon_numbers.values())
+    occupied_numbers = set(group.talon_numbers.values())
 
     if number == 0:
         number = 1
@@ -207,12 +402,12 @@ async def add_talon(message: Message, number: int):
         await message.answer(f"Талон №{number} уже занят.")
         return
 
-    talon_numbers[user_id] = number
-    queue.append(user_id)
+    group.talon_numbers[user_id] = number
+    group.queue.append(user_id)
 
     display_name = get_display_name(message)
     if display_name is not None:
-        usernames[user_id] = display_name
+        group.usernames[user_id] = display_name
 
     await message.answer(f"Вы заняли место. Ваш талон №{number}")
 
@@ -259,8 +454,12 @@ async def request_dismiss_talon(message: Message, state: FSMContext):
         return
 
     user_id = message.from_user.id
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    group = get_group_queue(group_id)
 
-    if user_id not in queue:
+    if user_id not in group.queue:
         await state.clear()
         await message.answer(
             "У вас нет активного талона.",
@@ -281,8 +480,12 @@ async def remove_talon(message: Message, state: FSMContext):
         return
 
     user_id = message.from_user.id
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    group = get_group_queue(group_id)
 
-    if user_id not in queue:
+    if user_id not in group.queue:
         await state.clear()
         await message.answer(
             "У вас нет активного талона.",
@@ -290,10 +493,10 @@ async def remove_talon(message: Message, state: FSMContext):
         )
         return
 
-    number = talon_numbers.pop(user_id)
-    queue.remove(user_id)
+    number = group.talon_numbers.pop(user_id)
+    group.queue.remove(user_id)
 
-    normalize_after_delete(number)
+    normalize_after_delete(group, number)
 
     await state.clear()
     await message.answer(
@@ -308,48 +511,50 @@ async def dismiss_talon_command(message: Message, state: FSMContext):
 
 
 async def set_queue_status(message: Message, is_open: bool):
-    global queue_is_open
-
     if not is_admin(message):
         return
+    group_id = await require_group(message)
+    if group_id is None:
+        return
 
-    apply_queue_status(is_open)
+    apply_queue_status(group_id, is_open)
     status = "открыта" if is_open else "закрыта"
     await message.answer(
         f"Очередь {status} для новых участников.",
-        reply_markup=get_editor_keyboard(),
+        reply_markup=get_editor_keyboard(message),
     )
 
 
-def apply_queue_status(is_open: bool) -> None:
-    global queue_is_open
-    queue_is_open = is_open
+def apply_queue_status(group_id: int, is_open: bool) -> None:
+    get_group_queue(group_id).is_open = is_open
 
 
-def cancel_queue_schedule(action: str) -> bool:
-    task = queue_schedule_tasks.pop(action, None)
-    queue_schedule_labels.pop(action, None)
+def cancel_queue_schedule(group_id: int, action: str) -> bool:
+    group = get_group_queue(group_id)
+    task = group.schedule_tasks.pop(action, None)
+    group.schedule_labels.pop(action, None)
     if task is None:
         return False
     task.cancel()
     return True
 
 
-def schedule_queue_action(action: str, delay: float, label: str) -> None:
-    cancel_queue_schedule(action)
+def schedule_queue_action(group_id: int, action: str, delay: float, label: str) -> None:
+    group = get_group_queue(group_id)
+    cancel_queue_schedule(group_id, action)
 
     async def run_scheduled_action() -> None:
         try:
             await asyncio.sleep(delay)
-            apply_queue_status(action == "open")
-            queue_schedule_tasks.pop(action, None)
-            queue_schedule_labels.pop(action, None)
+            apply_queue_status(group_id, action == "open")
+            group.schedule_tasks.pop(action, None)
+            group.schedule_labels.pop(action, None)
             logging.info("Очередь автоматически %s.", "открыта" if action == "open" else "закрыта")
         except asyncio.CancelledError:
             raise
 
-    queue_schedule_labels[action] = label
-    queue_schedule_tasks[action] = asyncio.create_task(run_scheduled_action())
+    group.schedule_labels[action] = label
+    group.schedule_tasks[action] = asyncio.create_task(run_scheduled_action())
 
 
 def parse_schedule_request(text: str) -> tuple[str, float, str] | None:
@@ -401,21 +606,25 @@ async def finish_schedule(
     delay: float,
     label: str,
 ) -> None:
-    schedule_queue_action(action, delay, label)
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    schedule_queue_action(group_id, action, delay, label)
     status = "открытие" if action == "open" else "закрытие"
     await state.clear()
     await message.answer(
         f"Запланировано {status} очереди {label}.",
-        reply_markup=get_editor_keyboard(),
+        reply_markup=get_editor_keyboard(message),
     )
 
 
-def get_queue_schedule_text() -> str:
-    if not queue_schedule_labels:
+def get_queue_schedule_text(group_id: int) -> str:
+    current_schedule_labels = get_group_queue(group_id).schedule_labels
+    if not current_schedule_labels:
         return "Активных расписаний нет."
     lines = [
         f"{'Открытие' if action == 'open' else 'Закрытие'}: {label}"
-        for action, label in queue_schedule_labels.items()
+        for action, label in current_schedule_labels.items()
     ]
     return "Активные расписания:\n" + "\n".join(lines)
 
@@ -449,11 +658,14 @@ async def schedule_queue_command(
 async def cancel_schedule_command(message: Message):
     if not is_admin(message):
         return
+    group_id = await require_group(message)
+    if group_id is None:
+        return
     cancelled = sum(
-        cancel_queue_schedule(action) for action in ("open", "close")
+        cancel_queue_schedule(group_id, action) for action in ("open", "close")
     )
     text = "Расписания отменены." if cancelled else "Активных расписаний нет."
-    await message.answer(text, reply_markup=get_editor_keyboard())
+    await message.answer(text, reply_markup=get_editor_keyboard(message))
 
 
 @dp.message(F.text == SCHEDULE_QUEUE_BUTTON)
@@ -538,7 +750,7 @@ async def process_schedule_date(message: Message, state: FSMContext):
 @dp.message(F.text == SCHEDULE_BACK_BUTTON)
 async def back_from_scheduler(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Редактор очереди.", reply_markup=get_editor_keyboard())
+    await message.answer("Редактор очереди.", reply_markup=get_editor_keyboard(message))
 
 
 @dp.message(F.text == CANCEL_SCHEDULE_BUTTON)
@@ -561,27 +773,184 @@ async def clear_queue_command(message: Message):
     if not is_admin(message):
         return
 
-    if not queue:
-        await message.answer("Очередь уже пустая.", reply_markup=get_editor_keyboard())
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    group = get_group_queue(group_id)
+    if not group.queue:
+        await message.answer("Очередь уже пустая.", reply_markup=get_editor_keyboard(message))
         return
 
-    queue.clear()
-    talon_numbers.clear()
-    usernames.clear()
+    group.queue.clear()
+    group.talon_numbers.clear()
+    group.usernames.clear()
 
     await message.answer(
         "Очередь успешно очищена.",
-        reply_markup=get_editor_keyboard(),
+        reply_markup=get_editor_keyboard(message),
     )
 
 
 @dp.message(Command("queue"))
 async def show_queue(message: Message):
-    await message.answer(get_queue_text())
+    group_id = await require_group(message)
+    if group_id is not None:
+        await message.answer(get_queue_text(group_id))
+
+
+@dp.callback_query((F.data == "group:new") | F.data.regexp(r"^group:\d+$"))
+async def group_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user is None or callback.message is None:
+        await callback.answer()
+        return
+
+    data = callback.data or ""
+    if data == "group:new":
+        target_state = (
+            EditorStates.waiting_new_group_name
+            if is_admin_user(callback.from_user.username)
+            else TalonStates.waiting_group_name
+        )
+        await state.set_state(target_state)
+        await callback.message.answer("Введите название новой группы.")
+        await callback.answer()
+        return
+
+    try:
+        group_id = int(data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer("Некорректная группа.", show_alert=True)
+        return
+    if not any(row["id"] == group_id for row in get_groups()):
+        await callback.answer("Группа больше не существует.", show_alert=True)
+        return
+
+    switch_user_group(
+        callback.from_user.id,
+        callback.from_user.username
+        or callback.from_user.full_name
+        or str(callback.from_user.id),
+        group_id,
+    )
+    await state.clear()
+    await callback.message.answer(
+        f"Вы выбрали группу «{get_group_name(group_id)}».",
+        reply_markup=get_main_keyboard(
+            admin=is_admin_user(callback.from_user.username),
+        ),
+    )
+    await callback.answer()
+
+
+@dp.message(TalonStates.waiting_group_name, F.text)
+async def process_group_name(message: Message, state: FSMContext):
+    if message.text is None:
+        return
+    group_id = create_group(message.text)
+    if group_id is None:
+        await message.answer("Группа с таким названием уже существует или имя пустое.")
+        return
+    if message.from_user is not None:
+        switch_user_group(
+            message.from_user.id,
+            message.from_user.username
+            or message.from_user.full_name
+            or str(message.from_user.id),
+            group_id,
+        )
+    await state.clear()
+    await message.answer(
+        f"Группа «{get_group_name(group_id)}» создана.",
+        reply_markup=get_main_keyboard(message),
+    )
+
+
+@dp.message(F.text == CHANGE_GROUP_BUTTON)
+async def change_group_button(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Выберите новую группу:",
+        reply_markup=get_group_selection_keyboard(),
+    )
+
+
+def get_group_admin_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"🗑 {row['name']}",
+                callback_data=f"group:delete:{row['id']}",
+            )
+        ]
+        for row in get_groups()
+    ]
+    buttons.append(
+        [InlineKeyboardButton(text=ADD_GROUP_BUTTON, callback_data="group:admin_new")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@dp.message(F.text == GROUPS_BUTTON)
+async def groups_button(message: Message):
+    if not is_admin(message):
+        return
+    await message.answer(
+        "Управление группами:",
+        reply_markup=get_group_admin_keyboard(),
+    )
+
+
+@dp.callback_query(F.data.startswith("group:delete:"))
+async def delete_group_callback(callback: CallbackQuery):
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+
+    if not is_admin_user(callback.from_user.username):
+        await callback.answer("Недостаточно прав.", show_alert=True)
+        return
+
+    # Теперь Pylance знает, что message — обычный Message
+    await callback.message.edit_reply_markup(
+        reply_markup=get_group_admin_keyboard()
+    )
+    await callback.answer("Группа удалена.")
+
+
+@dp.callback_query(F.data == "group:admin_new")
+async def admin_new_group_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.message is None or not is_admin_user(callback.from_user.username):
+        await callback.answer("Недостаточно прав.", show_alert=True)
+        return
+    await state.set_state(EditorStates.waiting_new_group_name)
+    await callback.message.answer("Введите название новой группы.")
+    await callback.answer()
+
+
+@dp.message(EditorStates.waiting_new_group_name, F.text)
+async def process_admin_group_name(message: Message, state: FSMContext):
+    if not is_admin(message) or message.text is None:
+        return
+    group_id = create_group(message.text)
+    if group_id is None:
+        await message.answer("Группа с таким названием уже существует или имя пустое.")
+        return
+    assign_user_to_group(message, group_id)
+    await state.clear()
+    await message.answer(
+        f"Группа «{get_group_name(group_id)}» создана.",
+        reply_markup=get_main_keyboard(message),
+    )
 
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
+    if get_message_group_id(message) is None:
+        await message.answer(
+            "Выберите группу для работы с очередью:",
+            reply_markup=get_group_selection_keyboard(),
+        )
+        return
     await message.answer(
         "Выберите действие:",
         reply_markup=get_main_keyboard(message),
@@ -590,6 +959,8 @@ async def start_handler(message: Message):
 
 @dp.message(F.text == "🎟 Взять талон")
 async def take_talon_button(message: Message, state: FSMContext):
+    if await require_group(message) is None:
+        return
     await show_queue(message)
     await state.set_state(TalonStates.waiting_number)
     await message.answer(
@@ -628,18 +999,24 @@ async def queue_editor_button(message: Message, state: FSMContext):
         return
 
     await state.clear()
+    group_id = await require_group(message)
+    if group_id is None:
+        return
     await message.answer(
-        get_queue_text(),
-        reply_markup=get_editor_keyboard(),
+        get_queue_text(group_id),
+        reply_markup=get_editor_keyboard(message),
     )
 
 
 @dp.message(F.text == "🔄 Обновить очередь")
 async def refresh_editor_queue(message: Message):
     if is_admin(message):
+        group_id = await require_group(message)
+        if group_id is None:
+            return
         await message.answer(
-            get_queue_text(),
-            reply_markup=get_editor_keyboard(),
+            get_queue_text(group_id),
+            reply_markup=get_editor_keyboard(message),
         )
 
 
@@ -680,7 +1057,10 @@ async def process_change_talon(message: Message, state: FSMContext):
         await message.answer("Введите номер талона числом.")
         return
 
-    user_id = find_user_by_talon(old_number)
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    user_id = find_user_by_talon(group_id, old_number)
 
     if user_id is None:
         await message.answer("Человек с таким номером не найден.")
@@ -706,19 +1086,23 @@ async def process_new_talon_number(message: Message, state: FSMContext):
         await message.answer("Номер должен быть положительным.")
         return
 
-    if new_number in talon_numbers.values():
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    group = get_group_queue(group_id)
+    if new_number in group.talon_numbers.values():
         await message.answer("Этот номер уже занят.")
         return
 
     data = await state.get_data()
     user_id = data["user_id"]
-    old_number = talon_numbers[user_id]
-    talon_numbers[user_id] = new_number
+    old_number = group.talon_numbers[user_id]
+    group.talon_numbers[user_id] = new_number
 
     await state.clear()
     await message.answer(
-        f"Номер изменён: {old_number} → {new_number}\n\n{get_queue_text()}",
-        reply_markup=get_editor_keyboard(),
+        f"Номер изменён: {old_number} → {new_number}\n\n{get_queue_text(group_id)}",
+        reply_markup=get_editor_keyboard(message),
     )
 
 
@@ -742,22 +1126,26 @@ async def process_delete_talon(message: Message, state: FSMContext):
         await message.answer("Введите номер талона числом.")
         return
 
-    user_id = find_user_by_talon(number)
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    group = get_group_queue(group_id)
+    user_id = find_user_by_talon(group_id, number)
 
     if user_id is None:
         await message.answer("Человек с таким номером не найден.")
         return
 
-    talon_numbers.pop(user_id, None)
-    usernames.pop(user_id, None)
-    queue.remove(user_id)
+    group.talon_numbers.pop(user_id, None)
+    group.usernames.pop(user_id, None)
+    group.queue.remove(user_id)
 
-    normalize_after_delete(number)
+    normalize_after_delete(group, number)
 
     await state.clear()
     await message.answer(
-        f"Талон №{number} удалён из очереди.\n\n{get_queue_text()}",
-        reply_markup=get_editor_keyboard(),
+        f"Талон №{number} удалён из очереди.\n\n{get_queue_text(group_id)}",
+        reply_markup=get_editor_keyboard(message),
     )
 
 
@@ -789,7 +1177,10 @@ async def process_swap_first(message: Message, state: FSMContext):
         await message.answer("Введите номер числом.")
         return
 
-    if find_user_by_talon(first_number) is None:
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    if find_user_by_talon(group_id, first_number) is None:
         await message.answer("Человек с таким номером не найден.")
         return
 
@@ -812,40 +1203,45 @@ async def process_swap_second(message: Message, state: FSMContext):
     data = await state.get_data()
     first_number = data["first_number"]
 
-    first_user_id = find_user_by_talon(first_number)
-    second_user_id = find_user_by_talon(second_number)
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    group = get_group_queue(group_id)
+    first_user_id = find_user_by_talon(group_id, first_number)
+    second_user_id = find_user_by_talon(group_id, second_number)
 
     if first_user_id is None or second_user_id is None:
         await message.answer("Один из людей не найден.")
         return
 
-    talon_numbers[first_user_id], talon_numbers[second_user_id] = (
-        talon_numbers[second_user_id],
-        talon_numbers[first_user_id],
+    group.talon_numbers[first_user_id], group.talon_numbers[second_user_id] = (
+        group.talon_numbers[second_user_id],
+        group.talon_numbers[first_user_id],
     )
 
     await state.clear()
     await message.answer(
         f"Люди с номерами {first_number} и {second_number} поменялись местами.\n\n"
-        f"{get_queue_text()}",
-        reply_markup=get_editor_keyboard(),
+        f"{get_queue_text(group_id)}",
+        reply_markup=get_editor_keyboard(message),
     )
 
-def get_queue_text() -> str:
-    if not queue:
+def get_queue_text(group_id: int) -> str:
+    group = get_group_queue(group_id)
+    if not group.queue:
         return "Очередь пустая."
 
-    sorted_queue = sorted(queue, key=lambda user_id: talon_numbers[user_id])
+    sorted_queue = sorted(group.queue, key=lambda user_id: group.talon_numbers[user_id])
     lines = []
 
     for user_id in sorted_queue:
-        number = talon_numbers[user_id]
-        name = usernames.get(user_id, f"id:{user_id}")
+        number = group.talon_numbers[user_id]
+        name = group.usernames.get(user_id, f"id:{user_id}")
         lines.append(f"{number}. {name}")
 
     return "Текущая очередь:\n" + "\n".join(lines)
 
-def normalize_after_delete(deleted_number: int) -> None:
+def normalize_after_delete(group: GroupQueue, deleted_number: int) -> None:
     """Убирает только блок пустот перед ближайшим следующим занятым номером.
 
     Примеры:
@@ -853,7 +1249,7 @@ def normalize_after_delete(deleted_number: int) -> None:
     - 1,3,4 после удаления 1 -> 1,2
     """
     next_occupied = min(
-        (number for number in talon_numbers.values() if number > deleted_number),
+        (number for number in group.talon_numbers.values() if number > deleted_number),
         default=None,
     )
 
@@ -862,18 +1258,20 @@ def normalize_after_delete(deleted_number: int) -> None:
 
     shift = next_occupied - deleted_number
 
-    for user_id, number in list(talon_numbers.items()):
+    for user_id, number in list(group.talon_numbers.items()):
         if number >= next_occupied:
-            talon_numbers[user_id] = number - shift
+            group.talon_numbers[user_id] = number - shift
 
-def find_user_by_talon(number: int) -> int | None:
-    for user_id in queue:
-        if talon_numbers.get(user_id) == number:
+def find_user_by_talon(group_id: int, number: int) -> int | None:
+    group = get_group_queue(group_id)
+    for user_id in group.queue:
+        if group.talon_numbers.get(user_id) == number:
             return user_id
     return None
 
 
 async def main():
+    init_database()
     if not TOKEN:
         raise RuntimeError("Не задан BOT_TOKEN")
 

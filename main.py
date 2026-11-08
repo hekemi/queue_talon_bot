@@ -46,11 +46,13 @@ class EditorStates(StatesGroup):
     waiting_schedule_timer = State()
     waiting_schedule_date = State()
     waiting_new_group_name = State()
+    waiting_max_talon_limit = State()
 
 
 OPEN_QUEUE_BUTTON = "🟢 Открыть очередь"
 CLOSE_QUEUE_BUTTON = "🔴 Закрыть очередь"
 CLEAR_QUEUE_BUTTON = "🧹 Очистить очередь"
+MAX_TALON_LIMIT_BUTTON = "⚙️ Лимит мест"
 SCHEDULE_QUEUE_BUTTON = "⏰ Планировщик"
 CANCEL_SCHEDULE_BUTTON = "❌ Отменить расписание"
 SCHEDULE_TIMER_BUTTON = "⏱ Таймер"
@@ -75,6 +77,7 @@ DELETE_GROUP_BUTTON = "🗑 Удалить группу"
 BACK_TO_GROUPS_BUTTON = "↩️ К группам"
 SWITCH_PLACES_USER_BUTTON = "🔁 Поменяться местами"
 BACK_USER_BUTTON = "↩️ Назад"
+DEFAULT_MAX_TALON_NUMBER = 50
 
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "data/queue.db"))
 
@@ -234,10 +237,13 @@ def get_editor_keyboard(message: Message) -> ReplyKeyboardMarkup:
                 KeyboardButton(text=CLEAR_QUEUE_BUTTON),
             ],
             [
+                KeyboardButton(text=MAX_TALON_LIMIT_BUTTON),
                 KeyboardButton(text=SCHEDULE_QUEUE_BUTTON),
-                KeyboardButton(text=CANCEL_SCHEDULE_BUTTON),
             ],
-            [KeyboardButton(text=BACK_USER_BUTTON)],
+            [
+                KeyboardButton(text=CANCEL_SCHEDULE_BUTTON),
+                KeyboardButton(text=BACK_USER_BUTTON),
+            ],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -374,6 +380,7 @@ class GroupQueue:
     talon_numbers: dict[int, int] = field(default_factory=dict)
     usernames: dict[int, str] = field(default_factory=dict)
     is_open: bool = True
+    max_talon_number: int = DEFAULT_MAX_TALON_NUMBER
     schedule_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     schedule_labels: dict[str, str] = field(default_factory=dict)
 
@@ -462,16 +469,27 @@ async def add_talon(message: Message, number: int):
     occupied_numbers = set(group.talon_numbers.values())
 
     if number == 0:
-        number = 1
-        while number in occupied_numbers:
-            number += 1
+        number = get_next_available_talon_number(group)
+        if number == 0:
+            await message.answer(
+                f"Все места до лимита ({group.max_talon_number}) заняты."
+            )
+            return
     elif number < 1:
         await message.answer("Введите положительный номер или 0.")
+        return
+    elif not check_talon_limit(group, number):
+        await message.answer(
+            f"Номер талона превышает лимит очереди ({group.max_talon_number})."
+        )
         return
     elif number in occupied_numbers:
         await message.answer(f"Талон №{number} уже занят.")
         return
 
+    # Если пользователь ввёл 0, мы берём ближайшее доступное место,
+    # но только внутри лимита очереди. Это сохраняет корректную структуру
+    # данных и не даёт "размножаться" длинным слотам.
     group.talon_numbers[user_id] = number
     group.queue.append(user_id)
 
@@ -492,7 +510,7 @@ async def take_talon(message: Message, command: CommandObject):
     try:
         number = int(command.args.strip())
     except ValueError:
-        await message.answer("Введите номер или 0.")
+        await message.answer("Введите номер талона числом.")
         return
 
     await add_talon(message, number)
@@ -1473,6 +1491,62 @@ async def process_swap_second(message: Message, state: FSMContext):
         reply_markup=get_editor_keyboard(message),
     )
 
+
+@dp.message(F.text == MAX_TALON_LIMIT_BUTTON)
+async def start_change_max_talon_limit(message: Message, state: FSMContext):
+    """Запускает ввод нового лимита максимального номера талона.
+
+    Администратор задаёт число, после чего в обработчике проходит проверка
+    валидности: число должно быть целым и положительным. Это отдельный
+    диалог, чтобы не смешивать логику редактирования очереди и настройки.
+    """
+    if not is_admin(message):
+        return
+
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    group = get_group_queue(group_id)
+    await state.set_state(EditorStates.waiting_max_talon_limit)
+    await message.answer(
+        f"Введите новый лимит мест в очереди. Текущее значение: {group.max_talon_number}."
+    )
+
+
+@dp.message(EditorStates.waiting_max_talon_limit, F.text)
+async def process_max_talon_limit(message: Message, state: FSMContext):
+    """Сохраняет лимит мест после валидации.
+
+    После ввода администратор получает актуальный лимит в текущей группе.
+    При этом ограничение гарантирует, что новые участники не смогут занять
+    номер за пределами допустимого диапазона.
+    """
+    if not is_admin(message) or message.text is None:
+        return
+
+    try:
+        limit = int(message.text.strip())
+    except ValueError:
+        await message.answer("Введите лимит числом, например: 50.")
+        return
+
+    if limit < 1:
+        await message.answer("Лимит должен быть положительным числом.")
+        return
+
+    group_id = await require_group(message)
+    if group_id is None:
+        return
+    group = get_group_queue(group_id)
+    group.max_talon_number = limit
+
+    await state.clear()
+    await message.answer(
+        f"Лимит очереди обновлён: {limit} мест.\n\n{get_queue_text(group_id)}",
+        reply_markup=get_editor_keyboard(message),
+    )
+
+
 def get_queue_text(group_id: int) -> str:
     group = get_group_queue(group_id)
     if not group.queue:
@@ -1515,6 +1589,31 @@ def find_user_by_talon(group_id: int, number: int) -> int | None:
         if group.talon_numbers.get(user_id) == number:
             return user_id
     return None
+
+
+def get_next_available_talon_number(group: GroupQueue, start_from: int = 1) -> int:
+    """Возвращает ближайший свободный номер в пределах лимита.
+
+    Если пользователь выбирает 0, бот пытается занять первый свободный слот,
+    но не выходит за пределы max_talon_number. Это важно, чтобы очередь
+    не росла бесконечно и не создавалась "пустая" длинная последовательность.
+    """
+    occupied_numbers = set(group.talon_numbers.values())
+    candidate = start_from
+    while candidate <= group.max_talon_number:
+        if candidate not in occupied_numbers:
+            return candidate
+        candidate += 1
+    return 0
+
+
+def check_talon_limit(group: GroupQueue, number: int) -> bool:
+    """Проверяет, что номер талона не выходит за лимит группы.
+
+    Если номер выше максимального допустимого, новый участник не сможет
+    занять место. Это защита от "длинных" номеров, которые портят очередь.
+    """
+    return 1 <= number <= group.max_talon_number
 
 
 async def main():

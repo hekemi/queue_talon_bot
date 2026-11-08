@@ -1152,12 +1152,19 @@ async def process_user_swap_target(message: Message, state: FSMContext):
 
 
 @dp.message(F.text.in_({CONFIRM_BUTTON, CANCEL_BUTTON}))
-async def process_user_swap_response(message: Message):
+async def process_user_swap_response(message: Message, state: FSMContext):
     if message.from_user is None:
         return
     bot = message.bot
     if bot is None:
         logging.error("Не удалось отправить ответ обмена: бот недоступен.")
+        return
+
+    if await state.get_state() == TalonStates.waiting_dismiss_confirmation.state:
+        if message.text == CONFIRM_BUTTON:
+            await remove_talon(message, state)
+        else:
+            await cancel_dismiss_talon(message, state)
         return
 
     target_id = message.from_user.id

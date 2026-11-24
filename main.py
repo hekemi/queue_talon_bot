@@ -16,7 +16,11 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
 )
-from aiogram.exceptions import TelegramUnauthorizedError, TelegramNetworkError
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramNetworkError,
+    TelegramUnauthorizedError,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -199,7 +203,10 @@ def delete_group(group_id: int) -> bool:
     with get_db() as connection:
         cursor = connection.execute("DELETE FROM groups WHERE id = ?", (group_id,))
     clear_group_swap_requests(group_id)
-    group_queues.pop(group_id, None)
+    group = group_queues.pop(group_id, None)
+    if group is not None:
+        for task in group.schedule_tasks.values():
+            task.cancel()
     return cursor.rowcount > 0
 
 
@@ -977,6 +984,16 @@ def get_group_admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+async def refresh_group_admin_keyboard(message: Message) -> None:
+    try:
+        await message.edit_reply_markup(
+            reply_markup=get_group_admin_keyboard()
+        )
+    except TelegramBadRequest as error:
+        if "message is not modified" not in str(error).lower():
+            raise
+
+
 @dp.message(F.text == GROUPS_BUTTON)
 async def groups_button(message: Message):
     if not is_admin(message):
@@ -997,11 +1014,19 @@ async def delete_group_callback(callback: CallbackQuery):
         await callback.answer("Недостаточно прав.", show_alert=True)
         return
 
-    # Теперь Pylance знает, что message — обычный Message
-    await callback.message.edit_reply_markup(
-        reply_markup=get_group_admin_keyboard()
-    )
+    try:
+        group_id = int((callback.data or "").rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer("Некорректная группа.", show_alert=True)
+        return
+
+    if not delete_group(group_id):
+        await callback.answer("Группа больше не существует.", show_alert=True)
+        await refresh_group_admin_keyboard(callback.message)
+        return
+
     await callback.answer("Группа удалена.")
+    await refresh_group_admin_keyboard(callback.message)
 
 
 @dp.callback_query(F.data == "group:admin_new")

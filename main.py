@@ -644,45 +644,74 @@ def schedule_queue_action(group_id: int, action: str, delay: float, label: str) 
 
 
 def parse_schedule_request(text: str) -> tuple[str, float, str] | None:
-    parts = text.strip().split(maxsplit=3)
+    # Поддержка расписания с секундами: HH:MM:SS или HH:MM.
+    # Если секунды не указаны, datetime.strptime выставляет их в 00,
+    # поэтому действие срабатывает ровно в начале нужной минуты.
+    parts = text.strip().split(maxsplit=2)
     if len(parts) < 3:
         return None
 
     schedule_type, action = parts[0].lower(), parts[1].lower()
+    schedule_value = parts[2].strip()
     action_aliases = {"открыть": "open", "закрыть": "close", "open": "open", "close": "close"}
     action = action_aliases.get(action, "")
     if schedule_type in {"таймер", "timer"}:
         if action not in {"open", "close"}:
             return None
         try:
-            minutes = float(parts[2].replace(",", "."))
+            minutes = float(schedule_value.replace(",", "."))
         except ValueError:
             return None
         if minutes <= 0:
             return None
         return action, minutes * 60, f"через {minutes:g} мин."
 
-    if schedule_type not in {"дата", "date"} or action not in {"open", "close"} or len(parts) < 4:
+    if schedule_type not in {"дата", "date"} or action not in {"open", "close"}:
         return None
 
-    try:
-        scheduled_at = datetime.strptime(
-            f"{parts[2]} {parts[3]}",
-            "%d.%m.%Y %H:%M",
-        ).astimezone()
-    except ValueError:
+    local_tz = datetime.now().astimezone().tzinfo
+    if local_tz is None:
+        return None
+
+    datetime_formats = (
+        "%d.%m.%Y %H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    )
+
+    scheduled_at = None
+    for fmt in datetime_formats:
         try:
-            scheduled_at = datetime.strptime(
-                f"{parts[2]} {parts[3]}",
-                "%Y-%m-%d %H:%M",
-            ).astimezone()
+            parsed = datetime.strptime(schedule_value, fmt)
+            scheduled_at = parsed.replace(tzinfo=local_tz, microsecond=0)
+            break
         except ValueError:
-            return None
+            continue
+
+    # Поддержка ввода только времени: выполняется сегодня.
+    if scheduled_at is None:
+        for fmt in ("%H:%M:%S", "%H:%M"):
+            try:
+                parsed_time = datetime.strptime(schedule_value, fmt)
+                now_local = datetime.now().astimezone()
+                scheduled_at = now_local.replace(
+                    hour=parsed_time.hour,
+                    minute=parsed_time.minute,
+                    second=parsed_time.second,
+                    microsecond=0,
+                )
+                break
+            except ValueError:
+                continue
+
+    if scheduled_at is None:
+        return None
 
     delay = (scheduled_at - datetime.now().astimezone()).total_seconds()
     if delay <= 0:
         return None
-    return action, delay, scheduled_at.strftime("%d.%m.%Y %H:%M %Z")
+    return action, delay, scheduled_at.strftime("%d.%m.%Y %H:%M:%S")
 
 
 async def finish_schedule(
@@ -726,8 +755,9 @@ async def schedule_queue_command(
             "Используйте:\n"
             "/schedule_queue timer open 30\n"
             "/schedule_queue timer close 15\n"
-            "/schedule_queue date open 03.11.2026 19:00\n"
-            "/schedule_queue date close 03.11.2026 20:00"
+            "/schedule_queue date open 03.11.2026 19:00:30\n"
+            "/schedule_queue date close 03.11.2026 20:00\n"
+            "/schedule_queue date open 19:00"
         )
         return
     if not is_admin(message):
@@ -790,8 +820,8 @@ async def choose_schedule_action(message: Message, state: FSMContext):
     else:
         await state.set_state(EditorStates.waiting_schedule_date)
         await message.answer(
-            "Введите дату и время в формате ДД.ММ.ГГГГ ЧЧ:ММ\n"
-            "Например: 03.11.2026 19:00"
+            "Введите дату и время в формате ДД.ММ.ГГГГ ЧЧ:ММ[:СС]\n"
+            "Например: 03.11.2026 19:00:30 или 19:00 (сегодня, в 00 секунд)"
         )
 
 
@@ -825,8 +855,8 @@ async def process_schedule_date(message: Message, state: FSMContext):
     parsed = parse_schedule_request(f"дата {data['action']} {message.text}")
     if parsed is None:
         await message.answer(
-            "Не удалось распознать дату. Используйте формат ДД.ММ.ГГГГ ЧЧ:ММ "
-            "и укажите дату в будущем."
+            "Не удалось распознать дату. Используйте формат ДД.ММ.ГГГГ ЧЧ:ММ[:СС] "
+            "или ЧЧ:ММ[:СС] (сегодня), и укажите время в будущем."
         )
         return
     action, delay, label = parsed
